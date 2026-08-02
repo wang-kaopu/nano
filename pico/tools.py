@@ -7,11 +7,12 @@
 import shutil
 import subprocess
 import textwrap
-from functools import partial
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Type
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
+from .tool import CanUseTool, PermissionResult, ProgressCallback, Tool, ToolProgressData, ToolResult
 from .workspace import IGNORED_PATH_NAMES
 from .tool_context import ToolContext
 from .types import ToolArguments as ToolArgumentsPayload
@@ -83,23 +84,82 @@ class DelegateArguments(ToolArguments):
     max_steps: int = Field(default=3, ge=1)
 
 
-TOOL_ARGUMENT_MODELS: dict[str, Type[ToolArguments]] = {
-    "list_files": ListFilesArguments,
-    "read_file": ReadFileArguments,
-    "search": SearchArguments,
-    "run_shell": RunShellArguments,
-    "write_file": WriteFileArguments,
-    "patch_file": PatchFileArguments,
-    "delegate": DelegateArguments,
-}
+class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
+    """将工作区工具函数适配为统一 Tool 契约。"""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        input_schema: Type[ToolArguments],
+        description_text: str,
+        prompt_text: str,
+        runner: Callable[[ToolContext, ToolArgumentsPayload], str],
+        read_only: bool,
+        concurrency_safe: bool,
+        destructive: bool = False,
+        aliases: tuple[str, ...] = (),
+    ) -> None:
+        """初始化由已有工作区执行函数驱动的工具。"""
+        super().__init__(name=name, input_schema=input_schema, aliases=aliases)
+        self.description_text = description_text
+        self.prompt_text = prompt_text
+        self.runner = runner
+        self.read_only = read_only
+        self.concurrency_safe = concurrency_safe
+        self.destructive = destructive
+
+    def description(self, input_value: ToolArguments | None, options: Mapping[str, Any] | None = None) -> str:
+        """返回工具能力说明。"""
+        return self.description_text
+
+    def prompt(self, options: Mapping[str, Any] | None = None) -> str:
+        """返回工具调用指南。"""
+        return self.prompt_text
+
+    def is_concurrency_safe(self, input_value: ToolArguments) -> bool:
+        """返回当前工具输入的并发安全性。"""
+        return self.concurrency_safe
+
+    def is_read_only(self, input_value: ToolArguments) -> bool:
+        """返回当前工具输入是否只读。"""
+        return self.read_only
+
+    def is_destructive(self, input_value: ToolArguments) -> bool:
+        """返回当前工具输入是否可能修改工作区或执行命令。"""
+        return self.destructive
+
+    def check_permissions(self, input_value: ToolArguments, context: ToolContext) -> PermissionResult:
+        """执行工作区路径、文件状态和委派深度检查。"""
+        try:
+            _validate_workspace_input(context, self.name, input_value.model_dump(mode="python"))
+        except ValueError as exc:
+            return PermissionResult.deny(str(exc), input_value)
+        return PermissionResult.allow(input_value)
+
+    def call(
+        self,
+        args: ToolArguments,
+        context: ToolContext,
+        can_use_tool: CanUseTool,
+        parent_message: str | None,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolResult[str]:
+        """执行已通过权限检查的底层工作区工具。"""
+        if not can_use_tool(self, args):
+            raise PermissionError(f"tool '{self.name}' is not allowed in this run")
+        if on_progress is not None:
+            on_progress(ToolProgressData(stage="running"))
+        output = self.runner(context, args.model_dump(mode="python"))
+        progress = ToolProgressData(stage="completed")
+        if on_progress is not None:
+            on_progress(progress)
+        return ToolResult(output=output, content=output, progress=progress)
 
 
 def tool_arguments_model(name: str) -> Type[ToolArguments]:
     """返回工具名称对应的 Pydantic 参数模型。"""
-    try:
-        return TOOL_ARGUMENT_MODELS[name]
-    except KeyError as exc:
-        raise ValueError(f"unknown tool: {name}") from exc
+    return tool_definition(name).input_schema
 
 
 def tool_json_schema(name: str) -> dict[str, Any]:
@@ -109,10 +169,7 @@ def tool_json_schema(name: str) -> dict[str, Any]:
 
 def validate_tool_arguments(name: str, args: ToolArgumentsPayload | None) -> dict[str, Any]:
     """校验工具参数并返回规范化后的普通字典。"""
-    try:
-        model = tool_arguments_model(name).model_validate(args or {})
-    except ValidationError:
-        raise
+    model = tool_arguments_model(name).model_validate(args or {})
     return model.model_dump(mode="python")
 
 
@@ -129,56 +186,9 @@ def _human_schema(model: Type[ToolArguments]) -> dict[str, str]:
         result[name] = f"{field_type}{suffix}"
     return result
 
-BASE_TOOL_SPECS = {
-    "list_files": {
-        "schema": {"path": "str='.'"},
-        "risky": False,
-        "description": "List files in the workspace.",
-    },
-    "read_file": {
-        "schema": {"path": "str", "start": "int=1", "end": "int=200"},
-        "risky": False,
-        "description": "Read a UTF-8 file by line range.",
-    },
-    "search": {
-        "schema": {"pattern": "str", "path": "str='.'"},
-        "risky": False,
-        "description": "Search the workspace with rg or a simple fallback.",
-    },
-    "run_shell": {
-        "schema": {"command": "str", "timeout": "int=20"},
-        "risky": True,
-        "description": "Run a shell command in the repo root.",
-    },
-    "write_file": {
-        "schema": {"path": "str", "content": "str"},
-        "risky": True,
-        "description": "Write a new text file or overwrite a previously read file.",
-    },
-    "patch_file": {
-        "schema": {"path": "str", "old_text": "str", "new_text": "str"},
-        "risky": True,
-        "description": "Replace one exact text block in a previously read file.",
-    },
-}
-
-for _tool_name, _tool_spec in BASE_TOOL_SPECS.items():
-    _tool_spec["args_model"] = TOOL_ARGUMENT_MODELS[_tool_name]
-    _tool_spec["json_schema"] = tool_json_schema(_tool_name)
-    _tool_spec["schema"] = _human_schema(_tool_spec["args_model"])
-
-DELEGATE_TOOL_SPEC = {
-    "schema": {"task": "str", "max_steps": "int=3"},
-    "risky": False,
-    "description": "Ask a bounded read-only child agent to investigate.",
-}
-DELEGATE_TOOL_SPEC["args_model"] = TOOL_ARGUMENT_MODELS["delegate"]
-DELEGATE_TOOL_SPEC["json_schema"] = tool_json_schema("delegate")
-DELEGATE_TOOL_SPEC["schema"] = _human_schema(DELEGATE_TOOL_SPEC["args_model"])
-
-
 def legal_tool_names() -> set[str]:
-    return set(BASE_TOOL_SPECS) | {"delegate"}
+    """返回包括废弃别名在内的全部可识别工具名。"""
+    return {name for tool in TOOL_DEFINITIONS for name in (tool.name, *tool.aliases)}
 
 TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
@@ -191,17 +201,17 @@ TOOL_EXAMPLES = {
 }
 
 
-def build_tool_registry(context: ToolContext) -> dict[str, dict[str, Any]]:
+def build_tool_registry(context: ToolContext) -> dict[str, Tool[ToolArguments, str, ToolProgressData]]:
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
-    tools = {
-        name: {**spec, "run": partial(_TOOL_RUNNERS[name], context)}
-        for name, spec in BASE_TOOL_SPECS.items()
+    tools: dict[str, Tool[ToolArguments, str, ToolProgressData]] = {
+        tool.name: tool for tool in TOOL_DEFINITIONS if tool.name != "delegate"
     }
     # 子 agent 是刻意做成受限能力的：一旦深度耗尽，
     # 就连 delegate 这个工具都不再暴露给模型。
     if context.depth < context.max_depth:
-        tools["delegate"] = {**DELEGATE_TOOL_SPEC, "run": partial(tool_delegate, context)}
+        delegate = next(tool for tool in TOOL_DEFINITIONS if tool.name == "delegate")
+        tools[delegate.name] = delegate
     return tools
 
 
@@ -209,14 +219,14 @@ def tool_example(name: str) -> str:
     return TOOL_EXAMPLES.get(name, "")
 
 
-def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | None) -> dict[str, Any]:
-    args = validate_tool_arguments(name, args)
+def _validate_workspace_input(context: ToolContext, name: str, args: ToolArgumentsPayload) -> None:
+    """校验工具专属的工作区状态，不重复 Pydantic 的输入 schema 校验。"""
 
     if name == "list_files":
         path = context.path(args.get("path", "."))
         if not path.is_dir():
             raise ValueError("path is not a directory")
-        return args
+        return
 
     if name == "read_file":
         path = context.path(args["path"])
@@ -226,14 +236,14 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
         end = int(args.get("end", 200))
         if start < 1 or end < start:
             raise ValueError("invalid line range")
-        return args
+        return
 
     if name == "search":
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
         context.path(args.get("path", "."))
-        return args
+        return
 
     if name == "run_shell":
         command = str(args.get("command", "")).strip()
@@ -242,7 +252,7 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
         timeout = int(args.get("timeout", 20))
         if timeout < 1 or timeout > 120:
             raise ValueError("timeout must be in [1, 120]")
-        return args
+        return
 
     if name == "write_file":
         path = context.path(args["path"])
@@ -257,7 +267,7 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
                 raise ValueError("you must read this file before modifying it; use read_file first")
             if path.stat().st_mtime_ns // 1_000_000 != recorded_mtime:
                 raise ValueError("warning: file was modified externally; use read_file again")
-        return args
+        return
 
     if name == "patch_file":
         # patch_file 故意做得很严格：old_text 必须精确命中且只能出现一次，
@@ -279,7 +289,7 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
         count = text.count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
-        return args
+        return
 
     if name == "delegate":
         task = str(args.get("task", "")).strip()
@@ -287,7 +297,7 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
             raise ValueError("task must not be empty")
         if context.depth >= context.max_depth:
             raise ValueError("delegate depth exceeded")
-        return args
+        return
 
     raise ValueError(f"unknown tool: {name}")
 
@@ -425,11 +435,90 @@ def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
     return context.spawn_delegate(args)
 
 
-_TOOL_RUNNERS = {
-    "list_files": tool_list_files,
-    "read_file": tool_read_file,
-    "search": tool_search,
-    "run_shell": tool_run_shell,
-    "write_file": tool_write_file,
-    "patch_file": tool_patch_file,
-}
+TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
+    WorkspaceTool(
+        name="list_files",
+        input_schema=ListFilesArguments,
+        description_text="List files in the workspace.",
+        prompt_text="Use list_files to inspect a directory before making assumptions about its contents.",
+        runner=tool_list_files,
+        read_only=True,
+        concurrency_safe=True,
+    ),
+    WorkspaceTool(
+        name="read_file",
+        input_schema=ReadFileArguments,
+        description_text="Read a UTF-8 file by line range.",
+        prompt_text="Use read_file before modifying an existing file; it records the version that may be edited.",
+        runner=tool_read_file,
+        read_only=True,
+        concurrency_safe=True,
+    ),
+    WorkspaceTool(
+        name="search",
+        input_schema=SearchArguments,
+        description_text="Search the workspace with rg or a simple fallback.",
+        prompt_text="Use search to locate symbols or text across the workspace.",
+        runner=tool_search,
+        read_only=True,
+        concurrency_safe=True,
+    ),
+    WorkspaceTool(
+        name="run_shell",
+        input_schema=RunShellArguments,
+        description_text="Run a shell command in the repo root.",
+        prompt_text="Use run_shell only when file tools cannot perform the required command or verification.",
+        runner=tool_run_shell,
+        read_only=False,
+        concurrency_safe=False,
+        destructive=True,
+    ),
+    WorkspaceTool(
+        name="write_file",
+        input_schema=WriteFileArguments,
+        description_text="Write a new text file or overwrite a previously read file.",
+        prompt_text="Use write_file for new files or after read_file has confirmed an existing file version.",
+        runner=tool_write_file,
+        read_only=False,
+        concurrency_safe=False,
+        destructive=True,
+    ),
+    WorkspaceTool(
+        name="patch_file",
+        input_schema=PatchFileArguments,
+        description_text="Replace one exact text block in a previously read file.",
+        prompt_text="Use patch_file after read_file when one exact, unique text block should change.",
+        runner=tool_patch_file,
+        read_only=False,
+        concurrency_safe=False,
+        destructive=True,
+    ),
+    WorkspaceTool(
+        name="delegate",
+        input_schema=DelegateArguments,
+        description_text="Ask a bounded read-only child agent to investigate.",
+        prompt_text="Use delegate for bounded read-only investigation when a separate exploration pass helps.",
+        runner=tool_delegate,
+        read_only=True,
+        concurrency_safe=False,
+    ),
+)
+
+
+def tool_definition(name: str) -> WorkspaceTool:
+    """按规范名称或废弃别名获取工具定义。"""
+    for tool in TOOL_DEFINITIONS:
+        if name == tool.name or name in tool.aliases:
+            return tool
+    raise ValueError(f"unknown tool: {name}")
+
+
+def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | None) -> dict[str, Any]:
+    """校验输入 schema 与工具专属权限，并返回最终可执行输入。"""
+    tool = tool_definition(name)
+    input_value = tool.parse_input(args)
+    permission = tool.check_permissions(input_value, context)
+    if permission.behavior != "allow":
+        raise ValueError(permission.message)
+    updated_input = permission.updated_input or input_value
+    return updated_input.model_dump(mode="python")

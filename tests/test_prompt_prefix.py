@@ -12,11 +12,8 @@ class _Agent:
 
 
 def test_tool_signature_is_stable_across_registry_insertion_order(tmp_path):
-    tools = {
-        "b": {"schema": {"path": "str"}, "risky": False, "description": "B", "run": object()},
-        "a": {"schema": {"command": "str"}, "risky": True, "description": "A", "run": object()},
-    }
-    reordered = {"a": tools["a"], "b": tools["b"]}
+    tools = build_tool_registry(_Agent(tmp_path))
+    reordered = {name: tools[name] for name in reversed(tuple(tools))}
 
     assert tool_signature(tools) == tool_signature(reordered)
 

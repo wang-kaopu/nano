@@ -25,32 +25,40 @@ def tool_signature(tools):
         tool = tools[name]
         payload.append(
             {
-                "name": name,
-                "schema": tool["schema"],
-                "json_schema": tool.get("json_schema", {}),
-                "risky": tool["risky"],
-                "description": tool["description"],
+                "name": tool.name,
+                "aliases": tool.aliases,
+                "max_result_size_chars": tool.max_result_size_chars,
+                "input_json_schema": tool.input_json_schema,
+                "description": tool.description(None),
+                "prompt": tool.prompt(),
             }
         )
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def build_prompt_prefix(workspace, tools, built_at=None):
+def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False):
     tool_lines = []
     for name, tool in tools.items():
-        fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
-        risk = "approval required" if tool["risky"] else "safe"
-        tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
+        schema = tool.input_json_schema
+        required = set(schema.get("required", []))
+        fields = []
+        for field_name, field in schema.get("properties", {}).items():
+            default = "" if field_name in required else f"={field.get('default')!r}"
+            fields.append(f"{field_name}: {field.get('type', 'value')}{default}")
+        risk = "approval required" if not tool.is_read_only(tool.input_schema.model_construct()) else "safe"
+        tool_lines.append(f"- {name}({', '.join(fields)}) [{risk}] {tool.description(None)}\n  {tool.prompt()}")
     tool_text = "\n".join(tool_lines)
-    examples = "\n".join(
-        [
-            '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-            '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-            '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-            '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-            '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-            "<final>Done.</final>",
-        ]
+    tool_protocol_rules = (
+        "- Use the provided function tools for workspace actions; never serialize a <tool> tag yourself.\n"
+        "- Return the final answer as normal text after tool calls complete."
+        if native_tool_calls
+        else "- Return exactly one <tool>...</tool> or one <final>...</final>.\n"
+        "- Tool calls must look like:\n"
+        "  <tool>{{\"name\":\"tool_name\",\"args\":{{...}}}}</tool>\n"
+        "- For write_file and patch_file with multi-line text, prefer XML style:\n"
+        "  <tool name=\"write_file\" path=\"file.py\"><content>...</content></tool>\n"
+        "- Final answers must look like:\n"
+        "  <final>your answer</final>"
     )
     # prefix 可以理解成 agent 的“工作手册”：
     # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
@@ -60,13 +68,7 @@ def build_prompt_prefix(workspace, tools, built_at=None):
 
         Rules:
         - Use tools instead of guessing about the workspace.
-        - Return exactly one <tool>...</tool> or one <final>...</final>.
-        - Tool calls must look like:
-          <tool>{{"name":"tool_name","args":{{...}}}}</tool>
-        - For write_file and patch_file with multi-line text, prefer XML style:
-          <tool name="write_file" path="file.py"><content>...</content></tool>
-        - Final answers must look like:
-          <final>your answer</final>
+        {tool_protocol_rules}
         - Never invent tool results.
         - Keep answers concise and concrete.
         - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
@@ -78,9 +80,6 @@ def build_prompt_prefix(workspace, tools, built_at=None):
 
         Tools:
         {tool_text}
-
-        Valid response examples:
-        {examples}
 
         {workspace.text()}
         """

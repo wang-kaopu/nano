@@ -1,6 +1,8 @@
+import asyncio
 import os
 import json
 import json as jsonlib
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +19,7 @@ from pico import (
     WorkspaceContext,
     build_welcome,
 )
+from pico.query_events import ModelStreamEvent
 
 
 def build_workspace(tmp_path):
@@ -35,6 +38,11 @@ def build_agent(tmp_path, outputs, **kwargs):
         approval_policy=approval_policy,
         **kwargs,
     )
+
+
+async def _collect_events(stream):
+    """收集异步模型流事件，便于断言 provider 协议。"""
+    return [event async for event in stream]
 
 
 def patch_httpx_post(fake_urlopen):
@@ -289,6 +297,32 @@ def test_file_modification_requires_fresh_read_and_tracks_agent_writes(tmp_path)
     assert agent.run_tool("write_file", {"path": "sample.txt", "content": "second\n"}) == "wrote sample.txt (7 chars)"
 
 
+def test_large_tool_result_is_persisted_in_current_run(tmp_path):
+    script = 'print("x" * 6000)'
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+    agent = build_agent(
+        tmp_path,
+        [
+            f'<tool>{{"name":"run_shell","args":{{"command":{json.dumps(command)},"timeout":20}}}}</tool>',
+            "<final>Done.</final>",
+        ],
+    )
+
+    assert agent.ask("Generate a large command result") == "Done."
+
+    result_path = agent.current_run_dir / "tool-results" / "001-run_shell.txt"
+    assert result_path.exists()
+    assert len(result_path.read_text(encoding="utf-8")) > 5000
+    tool_event = next(item for item in agent.session["history"] if item["role"] == "tool")
+    assert "Full result persisted: .pico/runs/" in tool_event["content"]
+    trace_events = [
+        json.loads(line)
+        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+    ]
+    tool_trace = next(event for event in trace_events if event["event"] == "tool_executed")
+    assert tool_trace["result_artifact_path"].endswith("tool-results/001-run_shell.txt")
+
+
 def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="ask")
 
@@ -497,6 +531,123 @@ def test_openai_compatible_client_sends_prompt_cache_fields_and_records_usage():
     assert client.last_completion_metadata["cached_tokens"] == 1536
     assert client.last_completion_metadata["cache_hit"] is True
     assert client.last_completion_metadata["input_tokens"] == 2048
+
+
+def test_openai_compatible_client_sends_function_tools_and_emits_function_call():
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aread(self):
+            return b""
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}}'
+            yield 'data: {"type":"response.completed","response":{"output":[{"type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\\"path\\":\\"README.md\\"}"}]}}'
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, *, json, headers):
+            captured["method"] = method
+            captured["url"] = url
+            captured["body"] = json
+            captured["headers"] = headers
+            return FakeResponse()
+
+    client = OpenAICompatibleModelClient(
+        model="gpt-5.6",
+        base_url="https://api.openai.com/v1",
+        api_key="sk-test",
+        temperature=None,
+        timeout=30,
+    )
+    tools = [{"type": "function", "name": "read_file", "description": "Read a file.", "parameters": {"type": "object"}, "strict": False}]
+
+    with patch("pico.providers.clients.httpx.AsyncClient", FakeAsyncClient):
+        events = asyncio.run(
+            _collect_events(
+                client.stream(
+                    "hello",
+                    42,
+                    tools=tools,
+                    input_items=[{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                )
+            )
+        )
+
+    assert captured["body"]["tools"] == tools
+    assert captured["body"]["tool_choice"] == "auto"
+    assert captured["body"]["parallel_tool_calls"] is False
+    assert events[0].type == "tool_call"
+    assert events[0].metadata == {"call_id": "call_1", "name": "read_file", "arguments": '{"path":"README.md"}'}
+    assert events[1].type == "completed"
+    assert events[1].metadata["response_output"][0]["call_id"] == "call_1"
+
+
+def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_path):
+    class NativeToolClient:
+        supports_native_tool_calls = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+            self.requests = []
+
+        async def stream(self, prompt, max_new_tokens, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                assert kwargs["tools"][0]["type"] == "function"
+                yield ModelStreamEvent(
+                    "tool_call",
+                    metadata={"call_id": "call_read", "name": "read_file", "arguments": '{"path":"README.md","start":1,"end":1}'},
+                )
+                yield ModelStreamEvent(
+                    "completed",
+                    metadata={
+                        "response_output": [
+                            {
+                                "type": "function_call",
+                                "call_id": "call_read",
+                                "name": "read_file",
+                                "arguments": '{"path":"README.md","start":1,"end":1}',
+                            }
+                        ]
+                    },
+                )
+                return
+            function_output = kwargs["input_items"][-1]
+            assert function_output["type"] == "function_call_output"
+            assert function_output["call_id"] == "call_read"
+            assert "# README.md" in function_output["output"]
+            yield ModelStreamEvent("text_delta", text="Native result")
+            yield ModelStreamEvent("completed", metadata={"response_output": []})
+
+    client = NativeToolClient()
+    workspace = build_workspace(tmp_path)
+    agent = Pico(
+        model_client=client,
+        workspace=workspace,
+        session_store=SessionStore(tmp_path / ".pico" / "sessions"),
+        approval_policy="auto",
+    )
+
+    assert agent.ask("Read the README") == "Native result"
+    assert len(client.requests) == 2
 
 
 def test_openai_compatible_client_extracts_text_from_event_stream():

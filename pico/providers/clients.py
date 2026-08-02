@@ -341,6 +341,7 @@ class OpenAICompatibleModelClient:
         # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
         # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
+        self.supports_native_tool_calls = True
         self.last_completion_metadata = {}
 
     def complete(
@@ -349,6 +350,8 @@ class OpenAICompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
+        tools: list[JsonObject] | None = None,
+        input_items: list[JsonObject] | None = None,
     ) -> str:
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
@@ -369,7 +372,7 @@ class OpenAICompatibleModelClient:
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "input": [
+            "input": input_items or [
                 {
                     "role": "user",
                     "content": [
@@ -385,6 +388,10 @@ class OpenAICompatibleModelClient:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = False
         # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
         # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
@@ -460,17 +467,23 @@ class OpenAICompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
+        tools: list[JsonObject] | None = None,
+        input_items: list[JsonObject] | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """将 OpenAI Responses SSE 事件转换为文本增量和完成元数据。"""
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            "input": input_items or [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
             "max_output_tokens": max_new_tokens,
             "stream": True,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = False
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
@@ -510,11 +523,23 @@ class OpenAICompatibleModelClient:
                                 "prompt_cache_supported": self.supports_prompt_cache,
                                 "prompt_cache_key": prompt_cache_key,
                                 "prompt_cache_retention": prompt_cache_retention,
+                                "response_output": response_data.get("output", []),
                                 **_extract_usage_cache_details(response_data),
                             }
                             self.last_completion_metadata = metadata
                             yield ModelStreamEvent("completed", metadata=metadata)
                             return
+                        elif event_type == "response.output_item.done":
+                            item = event.get("item") or {}
+                            if item.get("type") == "function_call":
+                                yield ModelStreamEvent(
+                                    "tool_call",
+                                    metadata={
+                                        "call_id": str(item.get("call_id", "")),
+                                        "name": str(item.get("name", "")),
+                                        "arguments": str(item.get("arguments", "{}")),
+                                    },
+                                )
                         elif event_type in {"error", "response.failed"}:
                             error = event.get("error") or event.get("response", {}).get("error") or event
                             yield ModelStreamEvent("error", metadata={"message": str(error)})

@@ -23,6 +23,7 @@ from .prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
 from .run_store import RunStore
 from .security import REDACTED_VALUE
 from .session_store import SessionStore
+from .tool import Tool, ToolProgressData
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
 from .types import JsonObject, ModelClient
@@ -185,7 +186,7 @@ class Pico:
         bucket.append(item)
         del bucket[:-limit]
 
-    def build_tools(self) -> dict[str, dict[str, Any]]:
+    def build_tools(self) -> dict[str, Tool[Any, str, ToolProgressData]]:
         return toolkit.build_tool_registry(self.tool_context())
 
     @staticmethod
@@ -197,7 +198,7 @@ class Pico:
             raise ValueError("allowed_tools must be a non-empty sequence of tool names")
         return normalized
 
-    def _apply_tool_allowlist(self, tools: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    def _apply_tool_allowlist(self, tools: dict[str, Tool[Any, str, ToolProgressData]]) -> dict[str, Tool[Any, str, ToolProgressData]]:
         if self.allowed_tools is None:
             return tools
         legal_names = toolkit.legal_tool_names()
@@ -215,7 +216,11 @@ class Pico:
         return tool_signature(self.tools)
 
     def build_prefix(self) -> PromptPrefix:
-        return build_prompt_prefix(workspace=self.workspace, tools=self.tools)
+        return build_prompt_prefix(
+            workspace=self.workspace,
+            tools=self.tools,
+            native_tool_calls=bool(getattr(self.model_client, "supports_native_tool_calls", False)),
+        )
 
     def _apply_prefix_state(self, prefix_state: PromptPrefix) -> None:
         self.prefix_state = prefix_state
@@ -534,6 +539,18 @@ class Pico:
         result = self.tool_executor.execute(name, args)
         self._last_tool_result_metadata = dict(result.metadata)
         return result
+
+    def persist_tool_result(self, tool_name, content):
+        """将当前运行中超长工具输出保存为可审计工件。"""
+        if self.current_task_state is None or self.current_run_dir is None:
+            return ""
+        path = self.run_store.write_tool_result(
+            self.current_task_state,
+            self.current_task_state.tool_steps + 1,
+            str(tool_name),
+            str(content),
+        )
+        return str(path.relative_to(self.root))
 
     def run_tool(self, name, args):
         """执行一次工具调用，并在执行前后套上完整护栏。

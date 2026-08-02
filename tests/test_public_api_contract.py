@@ -1,11 +1,15 @@
 from pathlib import Path
 
 import pico
-from pico import Pico, SessionStore, WorkspaceContext, build_agent, build_arg_parser, build_welcome, main
+from pico import PermissionResult, Pico, SessionStore, Tool, ToolProgressData, ToolResult, WorkspaceContext, build_agent, build_arg_parser, build_welcome, main
 
 
 def test_public_api_exports_current_names_only():
     assert Pico is not None
+    assert Tool is not None
+    assert ToolResult is not None
+    assert ToolProgressData is not None
+    assert PermissionResult is not None
     assert SessionStore is not None
     assert WorkspaceContext is not None
     assert callable(build_agent)

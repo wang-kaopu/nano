@@ -29,6 +29,17 @@ class RunStore:
     def report_path(self, run_id: str | TaskState) -> Path:
         return self.run_dir(run_id) / "report.json"
 
+    def tool_result_path(self, run_id: str | TaskState, sequence: int, tool_name: str) -> Path:
+        """返回单次工具完整输出的持久化路径。"""
+        return self.run_dir(run_id) / "tool-results" / f"{int(sequence):03d}-{tool_name}.txt"
+
+    def write_tool_result(self, task_state: TaskState, sequence: int, tool_name: str, content: str) -> Path:
+        """保存超过模型上下文上限的完整工具输出。"""
+        path = self.tool_result_path(task_state, sequence, tool_name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
+
     def start_run(self, task_state: TaskState) -> Path:
         # 每次 ask() 都会生成一个 run 目录。
         # 这样一次用户请求对应一组独立工件，后续排查更容易。
