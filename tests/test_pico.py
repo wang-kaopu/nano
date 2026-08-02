@@ -242,6 +242,7 @@ def test_patch_file_replaces_exact_match(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello world\n", encoding="utf-8")
     agent = build_agent(tmp_path, [])
+    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
 
     result = agent.run_tool(
         "patch_file",
@@ -254,6 +255,38 @@ def test_patch_file_replaces_exact_match(tmp_path):
 
     assert result == "patched sample.txt"
     assert file_path.read_text(encoding="utf-8") == "hello agent\n"
+
+
+def test_existing_file_requires_read_before_modification(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("original\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    write_result = agent.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
+    patch_result = agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "original", "new_text": "replacement"})
+
+    assert "must read this file before modifying it" in write_result
+    assert "must read this file before modifying it" in patch_result
+    assert file_path.read_text(encoding="utf-8") == "original\n"
+
+
+def test_file_modification_requires_fresh_read_and_tracks_agent_writes(tmp_path):
+    file_path = tmp_path / "sample.txt"
+    file_path.write_text("original\n", encoding="utf-8")
+    agent = build_agent(tmp_path, [])
+
+    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
+    external_mtime = file_path.stat().st_mtime_ns + 1_000_000_000
+    file_path.write_text("external\n", encoding="utf-8")
+    os.utime(file_path, ns=(external_mtime, external_mtime))
+
+    stale_result = agent.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
+    assert "file was modified externally" in stale_result
+    assert file_path.read_text(encoding="utf-8") == "external\n"
+
+    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
+    assert agent.run_tool("write_file", {"path": "sample.txt", "content": "first\n"}) == "wrote sample.txt (6 chars)"
+    assert agent.run_tool("write_file", {"path": "sample.txt", "content": "second\n"}) == "wrote sample.txt (7 chars)"
 
 
 def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):

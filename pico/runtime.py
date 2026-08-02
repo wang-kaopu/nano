@@ -75,6 +75,7 @@ class Pico:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        self.read_file_state: dict[str, int] = {}
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -613,6 +614,7 @@ class Pico:
             depth=self.depth,
             max_depth=self.max_depth,
             spawn_delegate=self.spawn_delegate,
+            read_file_state=self.read_file_state,
         )
 
     def spawn_delegate(self, args):

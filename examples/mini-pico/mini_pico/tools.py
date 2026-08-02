@@ -16,8 +16,8 @@ TOOL_SPECS = {
     "list_files": ToolSpec("List files in the workspace.", False, '{"path": "str=."}'),
     "read_file": ToolSpec("Read a UTF-8 file by line range.", False, '{"path": "str", "start": "int=1", "end": "int=120"}'),
     "search": ToolSpec("Search text in the workspace.", False, '{"pattern": "str", "path": "str=."}'),
-    "write_file": ToolSpec("Write a text file.", True, '{"path": "str", "content": "str"}'),
-    "patch_file": ToolSpec("Replace one exact text block in a file.", True, '{"path": "str", "old_text": "str", "new_text": "str"}'),
+    "write_file": ToolSpec("Write a new text file or overwrite a previously read file.", True, '{"path": "str", "content": "str"}'),
+    "patch_file": ToolSpec("Replace one exact text block in a previously read file.", True, '{"path": "str", "old_text": "str", "new_text": "str"}'),
 }
 
 
@@ -29,7 +29,7 @@ def tool_signature():
     return "\n".join(lines)
 
 
-def validate_tool(workspace, name, args):
+def validate_tool(workspace, name, args, read_file_state=None):
     if name not in TOOL_SPECS:
         raise ValueError(f"unknown tool: {name}")
     args = args or {}
@@ -59,6 +59,12 @@ def validate_tool(workspace, name, args):
             raise ValueError("path is a directory")
         if "content" not in args:
             raise ValueError("missing content")
+        if read_file_state is not None and path.exists():
+            recorded_mtime = read_file_state.get(str(path))
+            if recorded_mtime is None:
+                raise ValueError("you must read this file before modifying it; use read_file first")
+            if path.stat().st_mtime_ns // 1_000_000 != recorded_mtime:
+                raise ValueError("warning: file was modified externally; use read_file again")
         return
     if name == "patch_file":
         path = workspace.path(args["path"])
@@ -69,23 +75,29 @@ def validate_tool(workspace, name, args):
             raise ValueError("old_text must not be empty")
         if "new_text" not in args:
             raise ValueError("missing new_text")
+        if read_file_state is not None:
+            recorded_mtime = read_file_state.get(str(path))
+            if recorded_mtime is None:
+                raise ValueError("you must read this file before modifying it; use read_file first")
+            if path.stat().st_mtime_ns // 1_000_000 != recorded_mtime:
+                raise ValueError("warning: file was modified externally; use read_file again")
         count = path.read_text(encoding="utf-8", errors="replace").count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
 
 
-def run_tool(workspace, name, args):
-    validate_tool(workspace, name, args)
+def run_tool(workspace, name, args, read_file_state=None):
+    validate_tool(workspace, name, args, read_file_state)
     if name == "list_files":
         return _list_files(workspace, args)
     if name == "read_file":
-        return _read_file(workspace, args)
+        return _read_file(workspace, args, read_file_state)
     if name == "search":
         return _search(workspace, args)
     if name == "write_file":
-        return _write_file(workspace, args)
+        return _write_file(workspace, args, read_file_state)
     if name == "patch_file":
-        return _patch_file(workspace, args)
+        return _patch_file(workspace, args, read_file_state)
     raise ValueError(f"unknown tool: {name}")
 
 
@@ -102,12 +114,17 @@ def _list_files(workspace, args):
     return "\n".join(lines) or "(empty)"
 
 
-def _read_file(workspace, args):
+def _read_file(workspace, args, read_file_state=None):
     path = workspace.path(args["path"])
     start = int(args.get("start", 1))
     end = int(args.get("end", 120))
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    if read_file_state is not None:
+        try:
+            read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+        except OSError:
+            pass
     return f"# {workspace.relative(path)}\n{body}"
 
 
@@ -136,17 +153,27 @@ def _search(workspace, args):
     return "\n".join(matches) or "(no matches)"
 
 
-def _write_file(workspace, args):
+def _write_file(workspace, args, read_file_state=None):
     path = workspace.path(args["path"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(str(args["content"]), encoding="utf-8")
+    if read_file_state is not None:
+        try:
+            read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+        except OSError:
+            pass
     return f"wrote {workspace.relative(path)}"
 
 
-def _patch_file(workspace, args):
+def _patch_file(workspace, args, read_file_state=None):
     path = workspace.path(args["path"])
     text = path.read_text(encoding="utf-8")
     old_text = str(args["old_text"])
     new_text = str(args["new_text"])
     path.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    if read_file_state is not None:
+        try:
+            read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+        except OSError:
+            pass
     return f"patched {workspace.relative(path)}"

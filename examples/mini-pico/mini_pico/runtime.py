@@ -23,7 +23,8 @@ class Pico:
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.history = []
-        self.tool_executor = ToolExecutor(workspace, approval_policy=approval_policy)
+        self.read_file_state = {}
+        self.tool_executor = ToolExecutor(workspace, approval_policy=approval_policy, read_file_state=self.read_file_state)
         self.context_manager = ContextManager(self)
         self.current_task_state = None
 

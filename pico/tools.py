@@ -153,12 +153,12 @@ BASE_TOOL_SPECS = {
     "write_file": {
         "schema": {"path": "str", "content": "str"},
         "risky": True,
-        "description": "Write a text file.",
+        "description": "Write a new text file or overwrite a previously read file.",
     },
     "patch_file": {
         "schema": {"path": "str", "old_text": "str", "new_text": "str"},
         "risky": True,
-        "description": "Replace one exact text block in a file.",
+        "description": "Replace one exact text block in a previously read file.",
     },
 }
 
@@ -250,6 +250,13 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
             raise ValueError("path is a directory")
         if "content" not in args:
             raise ValueError("missing content")
+        if path.exists():
+            # 既有文件必须基于本 agent 已读取的版本修改，避免盲写覆盖外部变更。
+            recorded_mtime = context.read_file_state.get(str(path))
+            if recorded_mtime is None:
+                raise ValueError("you must read this file before modifying it; use read_file first")
+            if path.stat().st_mtime_ns // 1_000_000 != recorded_mtime:
+                raise ValueError("warning: file was modified externally; use read_file again")
         return args
 
     if name == "patch_file":
@@ -263,6 +270,11 @@ def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | 
             raise ValueError("old_text must not be empty")
         if "new_text" not in args:
             raise ValueError("missing new_text")
+        recorded_mtime = context.read_file_state.get(str(path))
+        if recorded_mtime is None:
+            raise ValueError("you must read this file before modifying it; use read_file first")
+        if path.stat().st_mtime_ns // 1_000_000 != recorded_mtime:
+            raise ValueError("warning: file was modified externally; use read_file again")
         text = path.read_text(encoding="utf-8")
         count = text.count(old_text)
         if count != 1:
@@ -305,6 +317,10 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    try:
+        context.read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+    except OSError:
+        pass
     return f"# {path.relative_to(context.root)}\n{body}"
 
 
@@ -372,6 +388,10 @@ def tool_write_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     content = str(args["content"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+    try:
+        context.read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+    except OSError:
+        pass
     return f"wrote {path.relative_to(context.root)} ({len(content)} chars)"
 
 
@@ -389,6 +409,10 @@ def tool_patch_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     if count != 1:
         raise ValueError(f"old_text must occur exactly once, found {count}")
     path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
+    try:
+        context.read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+    except OSError:
+        pass
     return f"patched {path.relative_to(context.root)}"
 
 

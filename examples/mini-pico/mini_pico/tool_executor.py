@@ -11,16 +11,17 @@ class ToolExecutionResult:
 
 
 class ToolExecutor:
-    def __init__(self, workspace, approval_policy="auto"):
+    def __init__(self, workspace, approval_policy="auto", read_file_state=None):
         self.workspace = workspace
         self.approval_policy = approval_policy
+        self.read_file_state = read_file_state if read_file_state is not None else {}
 
     def execute(self, name, args):
         spec = tools.TOOL_SPECS.get(name)
         if spec is None:
             return ToolExecutionResult(f"error: unknown tool '{name}'", _metadata("rejected", name, read_only=False))
         try:
-            tools.validate_tool(self.workspace, name, args)
+            tools.validate_tool(self.workspace, name, args, self.read_file_state)
         except Exception as exc:
             return ToolExecutionResult(
                 f"error: invalid arguments for {name}: {exc}",
@@ -32,7 +33,7 @@ class ToolExecutor:
                 _metadata("rejected", name, error_code="approval_denied", read_only=False),
             )
         try:
-            content = clip(tools.run_tool(self.workspace, name, args))
+            content = clip(tools.run_tool(self.workspace, name, args, self.read_file_state))
             affected_paths = []
             if spec.risky and isinstance(args, dict) and args.get("path"):
                 affected_paths.append(str(args["path"]))

@@ -538,6 +538,7 @@ def _security_agent(workspace_root, approval_policy="auto", read_only=False):
 def _scenario_invalid_patch_nonunique(workspace_root):
     (workspace_root / "sample.txt").write_text("beta\nbeta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
+    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 200})
     agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta", "new_text": "locked"})
     return dict(agent._last_tool_result_metadata)
 
@@ -545,6 +546,7 @@ def _scenario_invalid_patch_nonunique(workspace_root):
 def _scenario_invalid_patch_missing_field(workspace_root):
     (workspace_root / "sample.txt").write_text("beta\n", encoding="utf-8")
     agent = _security_agent(workspace_root)
+    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 200})
     agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "beta"})
     return dict(agent._last_tool_result_metadata)
 

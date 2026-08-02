@@ -1,6 +1,6 @@
 """Narrow context passed from runtime into tool functions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 
@@ -15,6 +15,7 @@ class ToolContext:
     depth: int
     max_depth: int
     spawn_delegate: Callable[[ToolArguments], str]
+    read_file_state: dict[str, int] = field(default_factory=dict)
 
     def path(self, raw_path: str) -> Path:
         return self.path_resolver(str(raw_path))
