@@ -13,7 +13,11 @@ def test_session_store_saves_loads_and_finds_latest_session(tmp_path):
 
     assert first_path == store.path("session_001")
     assert json.loads(first_path.read_text(encoding="utf-8"))["id"] == "session_001"
-    assert store.load("session_002") == second
+    loaded = store.load("session_002")
+    assert loaded["id"] == second["id"]
+    assert loaded["history"] == second["history"]
+    assert loaded["checkpoints"] == {"current_id": "", "items": {}}
+    assert loaded["resume_state"]["status"] == "no-checkpoint"
     assert store.latest() == second_path.stem
 
 

@@ -1,5 +1,6 @@
 import os
 import json
+import json as jsonlib
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,18 @@ def build_agent(tmp_path, outputs, **kwargs):
         approval_policy=approval_policy,
         **kwargs,
     )
+
+
+def patch_httpx_post(fake_urlopen):
+    """将旧式 request 回调适配到 HTTPX 的 JSON POST 调用。"""
+    def fake_post(_client, url, *, json, headers):
+        request = type("FakeRequest", (), {})()
+        request.full_url = url
+        request.data = jsonlib.dumps(json).encode("utf-8")
+        request.headers = headers
+        return fake_urlopen(request, 30)
+
+    return patch("pico.providers.clients.httpx.Client.post", fake_post)
 
 
 def test_agent_runs_tool_then_final(tmp_path):
@@ -249,7 +262,7 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
     with patch("builtins.input") as mock_input:
         result = agent.run_tool("write_file", {})
 
-    assert result.startswith("error: invalid arguments for write_file: 'path'")
+    assert result.startswith("error: invalid arguments for write_file: 2 validation errors for WriteFileArguments")
     assert 'example: <tool name="write_file"' in result
     mock_input.assert_not_called()
 
@@ -326,7 +339,7 @@ def test_ollama_client_posts_expected_payload():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch_httpx_post(fake_urlopen):
         result = client.complete("hello", 42)
 
     assert result == "<final>ok</final>"
@@ -367,16 +380,16 @@ def test_openai_compatible_client_posts_expected_responses_payload():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch_httpx_post(fake_urlopen):
         result = client.complete("hello", 42)
 
     assert result == "<final>ok</final>"
     assert captured["url"] == "https://right.codes/v1/responses"
     assert captured["timeout"] == 30
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
-    assert captured["headers"]["Content-type"] == "application/json"
+    assert captured["headers"]["Content-Type"] == "application/json"
     assert captured["headers"]["Accept"] == "application/json"
-    assert captured["headers"]["User-agent"] == "pico/0.1"
+    assert captured["headers"]["User-Agent"] == "pico/0.1"
     assert captured["body"] == {
         "model": "right.codes/codex-mini",
         "input": [
@@ -436,7 +449,7 @@ def test_openai_compatible_client_sends_prompt_cache_fields_and_records_usage():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch_httpx_post(fake_urlopen):
         result = client.complete(
             "hello",
             42,
@@ -478,7 +491,7 @@ def test_openai_compatible_client_extracts_text_from_event_stream():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+    with patch("pico.providers.clients.httpx.Client.post", return_value=FakeResponse()):
         result = client.complete("hello", 42)
 
     assert result == "<final>stream ok</final>"
@@ -513,7 +526,7 @@ def test_openai_compatible_client_extracts_text_from_event_stream_deltas():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+    with patch("pico.providers.clients.httpx.Client.post", return_value=FakeResponse()):
         result = client.complete("hello", 42)
 
     assert result == "<final>OK</final>"
@@ -558,15 +571,15 @@ def test_anthropic_compatible_client_posts_expected_messages_payload():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", fake_urlopen):
+    with patch_httpx_post(fake_urlopen):
         result = client.complete("hello", 42)
 
     assert result == "<final>ok</final>"
     assert captured["url"] == "https://www.right.codes/claude-aws/v1/messages"
     assert captured["timeout"] == 30
-    assert captured["headers"]["X-api-key"] == "sk-test"
-    assert captured["headers"]["Anthropic-version"] == "2023-06-01"
-    assert captured["headers"]["Content-type"] == "application/json"
+    assert captured["headers"]["x-api-key"] == "sk-test"
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    assert captured["headers"]["Content-Type"] == "application/json"
     assert captured["body"] == {
         "model": "claude-sonnet-4-5-20250929",
         "messages": [
@@ -614,7 +627,7 @@ def test_anthropic_compatible_client_extracts_first_text_block():
         timeout=30,
     )
 
-    with patch("urllib.request.urlopen", return_value=FakeResponse()):
+    with patch("pico.providers.clients.httpx.Client.post", return_value=FakeResponse()):
         result = client.complete("hello", 42)
 
     assert result == "<final>ok</final>"
@@ -875,6 +888,37 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-test"
+    assert agent.model_client is fake_client
+
+
+def test_build_agent_uses_project_env_deepseek_key_by_default(tmp_path):
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "PICO_DEEPSEEK_API_BASE=https://api.deepseek.com/anthropic",
+                "PICO_DEEPSEEK_API_KEY=sk-project-deepseek",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = pico_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch(
+            "pico.cli.OllamaModelClient",
+            side_effect=AssertionError("ollama client should not be used"),
+        ), patch(
+            "pico.cli.OpenAICompatibleModelClient",
+            side_effect=AssertionError("openai client should not be used"),
+        ), patch("pico.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            fake_client = mock_anthropic.return_value
+            agent = pico_pkg.build_agent(args)
+
+    mock_anthropic.assert_called_once()
+    assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
+    assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
+    assert mock_anthropic.call_args.kwargs["api_key"] == "sk-project-deepseek"
     assert agent.model_client is fake_client
 
 

@@ -8,8 +8,124 @@ import shutil
 import subprocess
 import textwrap
 from functools import partial
+from typing import Annotated, Type
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from .workspace import IGNORED_PATH_NAMES
+
+
+class ToolArguments(BaseModel):
+    """所有模型生成工具参数的共同校验配置。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
+
+NonEmptyText = Annotated[str, StringConstraints(min_length=1)]
+
+
+class ListFilesArguments(ToolArguments):
+    """列出目录内容所需的参数。"""
+
+    path: str = "."
+
+
+class ReadFileArguments(ToolArguments):
+    """读取文件所需的参数。"""
+
+    path: NonEmptyText
+    start: int = Field(default=1, ge=1)
+    end: int = Field(default=200, ge=1)
+
+    @model_validator(mode="after")
+    def validate_line_range(self):
+        """确保结束行不早于起始行。"""
+        if self.end < self.start:
+            raise ValueError("end must be greater than or equal to start")
+        return self
+
+
+class SearchArguments(ToolArguments):
+    """搜索文本所需的参数。"""
+
+    pattern: NonEmptyText
+    path: str = "."
+
+
+class RunShellArguments(ToolArguments):
+    """执行 shell 命令所需的参数。"""
+
+    command: NonEmptyText
+    timeout: int = Field(default=20, ge=1, le=120)
+
+
+class WriteFileArguments(ToolArguments):
+    """写入文件所需的参数。"""
+
+    path: NonEmptyText
+    content: str
+
+
+class PatchFileArguments(ToolArguments):
+    """精确替换文件内容所需的参数。"""
+
+    path: NonEmptyText
+    old_text: NonEmptyText
+    new_text: str
+
+
+class DelegateArguments(ToolArguments):
+    """委派只读子任务所需的参数。"""
+
+    task: NonEmptyText
+    max_steps: int = Field(default=3, ge=1)
+
+
+TOOL_ARGUMENT_MODELS: dict[str, Type[ToolArguments]] = {
+    "list_files": ListFilesArguments,
+    "read_file": ReadFileArguments,
+    "search": SearchArguments,
+    "run_shell": RunShellArguments,
+    "write_file": WriteFileArguments,
+    "patch_file": PatchFileArguments,
+    "delegate": DelegateArguments,
+}
+
+
+def tool_arguments_model(name):
+    """返回工具名称对应的 Pydantic 参数模型。"""
+    try:
+        return TOOL_ARGUMENT_MODELS[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown tool: {name}") from exc
+
+
+def tool_json_schema(name):
+    """返回供模型调用协议使用的 JSON Schema。"""
+    return tool_arguments_model(name).model_json_schema()
+
+
+def validate_tool_arguments(name, args):
+    """校验工具参数并返回规范化后的普通字典。"""
+    try:
+        model = tool_arguments_model(name).model_validate(args or {})
+    except ValidationError:
+        raise
+    return model.model_dump(mode="python")
+
+
+def _human_schema(model):
+    """把 Pydantic 字段转换为 prompt 中使用的简短字段描述。"""
+    schema = model.model_json_schema()
+    properties = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    result = {}
+    for name, value in properties.items():
+        field_type = value.get("type", "value")
+        default = value.get("default")
+        suffix = "" if name in required else f"={default!r}"
+        result[name] = f"{field_type}{suffix}"
+    return result
 
 BASE_TOOL_SPECS = {
     "list_files": {
@@ -44,11 +160,19 @@ BASE_TOOL_SPECS = {
     },
 }
 
+for _tool_name, _tool_spec in BASE_TOOL_SPECS.items():
+    _tool_spec["args_model"] = TOOL_ARGUMENT_MODELS[_tool_name]
+    _tool_spec["json_schema"] = tool_json_schema(_tool_name)
+    _tool_spec["schema"] = _human_schema(_tool_spec["args_model"])
+
 DELEGATE_TOOL_SPEC = {
     "schema": {"task": "str", "max_steps": "int=3"},
     "risky": False,
     "description": "Ask a bounded read-only child agent to investigate.",
 }
+DELEGATE_TOOL_SPEC["args_model"] = TOOL_ARGUMENT_MODELS["delegate"]
+DELEGATE_TOOL_SPEC["json_schema"] = tool_json_schema("delegate")
+DELEGATE_TOOL_SPEC["schema"] = _human_schema(DELEGATE_TOOL_SPEC["args_model"])
 
 
 def legal_tool_names():
@@ -84,13 +208,13 @@ def tool_example(name):
 
 
 def validate_tool(context, name, args):
-    args = args or {}
+    args = validate_tool_arguments(name, args)
 
     if name == "list_files":
         path = context.path(args.get("path", "."))
         if not path.is_dir():
             raise ValueError("path is not a directory")
-        return
+        return args
 
     if name == "read_file":
         path = context.path(args["path"])
@@ -100,14 +224,14 @@ def validate_tool(context, name, args):
         end = int(args.get("end", 200))
         if start < 1 or end < start:
             raise ValueError("invalid line range")
-        return
+        return args
 
     if name == "search":
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
         context.path(args.get("path", "."))
-        return
+        return args
 
     if name == "run_shell":
         command = str(args.get("command", "")).strip()
@@ -116,7 +240,7 @@ def validate_tool(context, name, args):
         timeout = int(args.get("timeout", 20))
         if timeout < 1 or timeout > 120:
             raise ValueError("timeout must be in [1, 120]")
-        return
+        return args
 
     if name == "write_file":
         path = context.path(args["path"])
@@ -124,7 +248,7 @@ def validate_tool(context, name, args):
             raise ValueError("path is a directory")
         if "content" not in args:
             raise ValueError("missing content")
-        return
+        return args
 
     if name == "patch_file":
         # patch_file 故意做得很严格：old_text 必须精确命中且只能出现一次，
@@ -141,7 +265,7 @@ def validate_tool(context, name, args):
         count = text.count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
-        return
+        return args
 
     if name == "delegate":
         task = str(args.get("task", "")).strip()
@@ -149,7 +273,7 @@ def validate_tool(context, name, args):
             raise ValueError("task must not be empty")
         if context.depth >= context.max_depth:
             raise ValueError("delegate depth exceeded")
-        return
+        return args
 
 
 def tool_list_files(context, args):

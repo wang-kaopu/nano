@@ -536,8 +536,13 @@ class Pico:
         tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
         if len(tool_events) < 2:
             return False
+        normalized_args = toolkit.validate_tool_arguments(name, args)
         recent = tool_events[-2:]
-        return all(item["name"] == name and item["args"] == args for item in recent)
+        return all(
+            item["name"] == name
+            and toolkit.validate_tool_arguments(name, item.get("args", {})) == normalized_args
+            for item in recent
+        )
 
     @staticmethod
     def new_task_id():
@@ -573,7 +578,7 @@ class Pico:
 
     def validate_tool(self, name, args):
         """把通用工具校验和 runtime 级额外约束串起来。"""
-        toolkit.validate_tool(self.tool_context(), name, args)
+        return toolkit.validate_tool(self.tool_context(), name, args)
 
     def tool_context(self):
         return ToolContext(

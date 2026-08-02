@@ -3,6 +3,7 @@
 import uuid
 
 from .features import memory as memorylib
+from .schemas import CheckpointStateModel
 from .workspace import clip, now
 
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
@@ -45,7 +46,10 @@ def current_runtime_identity(agent):
 
 
 def checkpoint_state(agent):
+    """校验并返回当前会话的 checkpoint 字典。"""
     agent._ensure_session_shape()
+    model = CheckpointStateModel.model_validate(agent.session["checkpoints"])
+    agent.session["checkpoints"] = model.model_dump(mode="python")
     return agent.session["checkpoints"]
 
 
@@ -143,8 +147,8 @@ def infer_next_step(task_state):
 
 
 def create_checkpoint(agent, task_state, user_message, trigger):
-    state = checkpoint_state(agent)
     current = current_checkpoint(agent)
+    state = checkpoint_state(agent)
     checkpoint_id = "ckpt_" + uuid.uuid4().hex[:8]
     key_files = []
     freshness = {}

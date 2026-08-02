@@ -1,15 +1,36 @@
 """Structured tool execution for the agent runtime."""
 
-from dataclasses import dataclass
 import re
+from typing import Any
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .workspace import clip
 
 
-@dataclass(frozen=True)
-class ToolExecutionResult:
+class ToolExecutionMetadata(BaseModel):
+    """描述工具执行结果的审计元数据。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_status: str
+    tool_error_code: str = ""
+    security_event_type: str = ""
+    risk_level: str = "low"
+    read_only: bool = True
+    affected_paths: list[str] = Field(default_factory=list)
+    workspace_changed: bool = False
+    diff_summary: list[str] = Field(default_factory=list)
+    workspace_fingerprint: str = ""
+
+
+class ToolExecutionResult(BaseModel):
+    """统一承载工具文本结果和审计元数据。"""
+
+    model_config = ConfigDict(frozen=True)
+
     content: str
-    metadata: dict
+    metadata: dict[str, Any]
 
 
 def _metadata(
@@ -23,26 +44,29 @@ def _metadata(
     workspace_fingerprint="",
     diff_summary=None,
 ):
-    result = {
-        "tool_status": tool_status,
-        "tool_error_code": tool_error_code,
-        "security_event_type": security_event_type,
-        "risk_level": risk_level,
-        "read_only": read_only,
-        "affected_paths": list(affected_paths or []),
-        "workspace_changed": bool(workspace_changed),
-        "diff_summary": list(diff_summary or []),
-    }
-    if workspace_fingerprint:
-        result["workspace_fingerprint"] = workspace_fingerprint
-    return result
+    """创建并序列化工具审计元数据。"""
+    return ToolExecutionMetadata(
+        tool_status=tool_status,
+        tool_error_code=tool_error_code,
+        security_event_type=security_event_type,
+        risk_level=risk_level,
+        read_only=read_only,
+        affected_paths=list(affected_paths or []),
+        workspace_changed=bool(workspace_changed),
+        diff_summary=list(diff_summary or []),
+        workspace_fingerprint=workspace_fingerprint,
+    ).model_dump(mode="python")
 
 
 class ToolExecutor:
+    """执行工具并统一处理校验、审批、审计和异常。"""
+
     def __init__(self, agent):
+        """绑定运行时 agent。"""
         self.agent = agent
 
     def execute(self, name, args):
+        """执行一次工具调用并返回结构化结果。"""
         agent = self.agent
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
             return ToolExecutionResult(
@@ -68,7 +92,7 @@ class ToolExecutor:
             )
 
         try:
-            agent.validate_tool(name, args)
+            args = agent.validate_tool(name, args)
         except Exception as exc:
             example = agent.tool_example(name)
             message = f"error: invalid arguments for {name}: {exc}"

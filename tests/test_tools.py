@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from pico.tool_context import ToolContext
-from pico.tools import build_tool_registry, tool_delegate, tool_read_file
+from pico.tools import build_tool_registry, tool_delegate, tool_json_schema, tool_read_file
 
 
 def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
@@ -52,3 +52,11 @@ def test_build_tool_registry_binds_runners_to_tool_context(tmp_path):
 
     assert "read_file" in tools
     assert "delegate" not in tools
+
+
+def test_tool_schema_is_generated_from_pydantic_arguments():
+    schema = tool_json_schema("run_shell")
+
+    assert schema["properties"]["timeout"]["default"] == 20
+    assert schema["properties"]["timeout"]["maximum"] == 120
+    assert "command" in schema["required"]

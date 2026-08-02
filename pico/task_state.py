@@ -4,9 +4,11 @@
 这个对象会被不断写入 task_state.json，供运行中观察和运行后复盘。
 """
 
-from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
 
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
@@ -24,14 +26,17 @@ STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
 
 
-@dataclass
-class TaskState:
+class TaskState(BaseModel):
+    """描述一次 ask() 运行的可持久化状态。"""
+
+    model_config = ConfigDict(validate_assignment=True)
+
     run_id: str
     task_id: str
     user_request: str
-    status: str = STATUS_RUNNING
-    tool_steps: int = 0
-    attempts: int = 0
+    status: Literal[STATUS_RUNNING, STATUS_COMPLETED, STATUS_STOPPED, STATUS_FAILED] = STATUS_RUNNING
+    tool_steps: int = Field(default=0, ge=0)
+    attempts: int = Field(default=0, ge=0)
     last_tool: str = ""
     stop_reason: str = ""
     final_answer: str = ""
@@ -40,38 +45,31 @@ class TaskState:
 
     @classmethod
     def create(cls, task_id, user_request, run_id=""):
+        """创建一个新的运行状态并生成运行 ID。"""
         if not run_id:
             run_id = "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
         return cls(run_id=run_id, task_id=task_id, user_request=user_request)
 
     @classmethod
     def from_dict(cls, data):
-        return cls(
-            run_id=str(data.get("run_id", "")),
-            task_id=str(data.get("task_id", "")),
-            user_request=str(data.get("user_request", "")),
-            status=str(data.get("status", STATUS_RUNNING)),
-            tool_steps=int(data.get("tool_steps", 0)),
-            attempts=int(data.get("attempts", 0)),
-            last_tool=str(data.get("last_tool", "")),
-            stop_reason=str(data.get("stop_reason", "")),
-            final_answer=str(data.get("final_answer", "")),
-            checkpoint_id=str(data.get("checkpoint_id", "")),
-            resume_status=str(data.get("resume_status", "")),
-        )
+        """从结构化数据校验并恢复运行状态。"""
+        return cls.model_validate(data)
 
     def record_attempt(self):
+        """记录一次模型调用尝试。"""
         # attempt 统计的是“模型被调用了几轮”，不等于 tool_steps。
         self.attempts += 1
         return self
 
     def record_tool(self, name):
+        """记录一次实际执行的工具调用。"""
         # tool_steps 只统计真正进入执行阶段的工具调用次数。
         self.tool_steps += 1
         self.last_tool = str(name or "")
         return self
 
     def stop(self, stop_reason, status=STATUS_STOPPED, final_answer=""):
+        """以指定停止原因结束当前运行。"""
         # stop_reason 和 status 分开存，是为了区分“怎么停的”和“停下时是什么状态”。
         self.status = status
         self.stop_reason = stop_reason
@@ -80,31 +78,24 @@ class TaskState:
         return self
 
     def stop_step_limit(self, final_answer=""):
+        """标记运行达到最大步数。"""
         return self.stop(STOP_REASON_STEP_LIMIT_REACHED, final_answer=final_answer)
 
     def stop_retry_limit(self, final_answer=""):
+        """标记运行达到模型重试上限。"""
         return self.stop(STOP_REASON_RETRY_LIMIT_REACHED, final_answer=final_answer)
 
     def stop_model_error(self, final_answer=""):
+        """标记模型调用失败。"""
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)
 
     def finish_success(self, final_answer):
+        """标记运行成功并保存最终答案。"""
         self.status = STATUS_COMPLETED
         self.stop_reason = STOP_REASON_FINAL_ANSWER_RETURNED
         self.final_answer = str(final_answer)
         return self
 
     def to_dict(self):
-        return {
-            "run_id": self.run_id,
-            "task_id": self.task_id,
-            "user_request": self.user_request,
-            "status": self.status,
-            "tool_steps": self.tool_steps,
-            "attempts": self.attempts,
-            "last_tool": self.last_tool,
-            "stop_reason": self.stop_reason,
-            "final_answer": self.final_answer,
-            "checkpoint_id": self.checkpoint_id,
-            "resume_status": self.resume_status,
-        }
+        """返回用于 JSON 持久化的状态字典。"""
+        return self.model_dump(mode="json")

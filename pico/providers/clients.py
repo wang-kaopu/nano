@@ -7,11 +7,53 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 
 import json
 import time
-from http.client import RemoteDisconnected
-import urllib.error
-import urllib.request
+
+import httpx
+
+from ..schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
+
+
+def _validate_json_response(body_text, model):
+    """将 provider JSON 响应校验为指定 Pydantic 模型并返回字典。"""
+    try:
+        return model.model_validate_json(body_text).model_dump(mode="python")
+    except ValueError as exc:
+        raise RuntimeError("Provider returned invalid JSON response schema") from exc
+
+
+def _response_text(response):
+    """读取 HTTPX 响应文本，并保留测试替身的兼容读取方式。"""
+    text = getattr(response, "text", None)
+    if text is not None:
+        return text
+    return response.read().decode("utf-8")
+
+
+def _response_status_code(response):
+    """返回响应状态码，缺少该属性的轻量测试替身视为成功。"""
+    return int(getattr(response, "status_code", 200))
+
+
+def _request_with_retries(url, payload, headers, timeout, attempts=1):
+    """发送 JSON POST 请求，并对网络错误和 5xx 响应执行有限重试。"""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            with httpx.Client(timeout=timeout, trust_env=False) as client:
+                response = client.post(url, json=payload, headers=headers)
+        except httpx.RequestError as exc:
+            last_error = exc
+            if attempt < attempts - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
+        if _response_status_code(response) >= 500 and attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+            continue
+        return response
+    raise last_error or RuntimeError("HTTP request failed")
 
 
 class FakeModelClient:
@@ -56,25 +98,24 @@ class OllamaModelClient:
                 "top_p": self.top_p,
             },
         }
-        request = urllib.request.Request(
-            self.host + "/api/generate",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        headers = {"Content-Type": "application/json"}
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
+            response = _request_with_retries(
+                self.host + "/api/generate",
+                payload,
+                headers,
+                self.timeout,
+            )
+        except httpx.RequestError as exc:
             raise RuntimeError(
                 "Could not reach Ollama.\n"
                 "Make sure `ollama serve` is running and the model is available.\n"
                 f"Host: {self.host}\n"
                 f"Model: {self.model}"
             ) from exc
+        if _response_status_code(response) >= 400:
+            raise RuntimeError(f"Ollama request failed with HTTP {_response_status_code(response)}: {_response_text(response)}")
+        data = _validate_json_response(_response_text(response), OllamaResponseModel)
 
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
@@ -286,35 +327,26 @@ class OpenAICompatibleModelClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        request = urllib.request.Request(
-            self.base_url + "/responses",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                    headers = getattr(response, "headers", {}) or {}
-                    content_type = headers.get("Content-Type", "")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"OpenAI-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the OpenAI-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
+        try:
+            response = _request_with_retries(
+                self.base_url + "/responses",
+                payload,
+                headers,
+                self.timeout,
+                attempts=3,
+            )
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                "Could not reach the OpenAI-compatible backend.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+        status_code = _response_status_code(response)
+        if status_code >= 400:
+            raise RuntimeError(f"OpenAI-compatible request failed with HTTP {status_code}: {_response_text(response)}")
+        body_text = _response_text(response)
+        response_headers = getattr(response, "headers", {}) or {}
+        content_type = response_headers.get("Content-Type", response_headers.get("content-type", ""))
 
         # 有些兼容后端返回普通 JSON，有些返回 SSE。
         # 这里两种都接住，并尽量统一抽取文本和 usage/cache 元数据。
@@ -334,10 +366,10 @@ class OpenAICompatibleModelClient:
             raise RuntimeError("OpenAI-compatible error: could not extract text from event stream response")
 
         try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
+            data = _validate_json_response(body_text, OpenAIResponseModel)
+        except RuntimeError as exc:
             raise RuntimeError(
-                "OpenAI-compatible error: backend returned non-JSON content that could not be parsed"
+                "OpenAI-compatible error: backend returned an invalid JSON response"
             ) from exc
         if data.get("error"):
             raise RuntimeError(f"OpenAI-compatible error: {data['error']}")
@@ -399,39 +431,30 @@ class AnthropicCompatibleModelClient:
             "anthropic-version": "2023-06-01",
         }
 
-        request = urllib.request.Request(
-            self.base_url + "/messages",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        attempts = 3
-        for attempt in range(attempts):
-            try:
-                with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                    body_text = response.read().decode("utf-8")
-                break
-            except urllib.error.HTTPError as exc:
-                body = exc.read().decode("utf-8", errors="replace")
-                if exc.code >= 500 and attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(f"Anthropic-compatible request failed with HTTP {exc.code}: {body}") from exc
-            except (urllib.error.URLError, RemoteDisconnected) as exc:
-                if attempt < attempts - 1:
-                    time.sleep(0.5 * (attempt + 1))
-                    continue
-                raise RuntimeError(
-                    "Could not reach the Anthropic-compatible backend.\n"
-                    f"Base URL: {self.base_url}\n"
-                    f"Model: {self.model}"
-                ) from exc
+        try:
+            response = _request_with_retries(
+                self.base_url + "/messages",
+                payload,
+                headers,
+                self.timeout,
+                attempts=3,
+            )
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                "Could not reach the Anthropic-compatible backend.\n"
+                f"Base URL: {self.base_url}\n"
+                f"Model: {self.model}"
+            ) from exc
+        status_code = _response_status_code(response)
+        if status_code >= 400:
+            raise RuntimeError(f"Anthropic-compatible request failed with HTTP {status_code}: {_response_text(response)}")
+        body_text = _response_text(response)
 
         try:
-            data = json.loads(body_text)
-        except json.JSONDecodeError as exc:
+            data = _validate_json_response(body_text, AnthropicResponseModel)
+        except RuntimeError as exc:
             raise RuntimeError(
-                "Anthropic-compatible error: backend returned non-JSON content that could not be parsed"
+                "Anthropic-compatible error: backend returned an invalid JSON response"
             ) from exc
         if data.get("error"):
             raise RuntimeError(f"Anthropic-compatible error: {data['error']}")
