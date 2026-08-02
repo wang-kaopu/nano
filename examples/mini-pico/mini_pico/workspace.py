@@ -34,8 +34,10 @@ class Workspace:
         return f"Workspace root: {self.root}\nFiles:\n{listing}\nREADME excerpt:\n{readme_text}"
 
 
-def clip(text, limit=4000):
+def clip(text, limit=5000):
+    """保留过长文本的首尾内容，避免丢失工具输出结论。"""
     text = str(text)
-    if len(text) <= limit:
+    if len(text) < limit:
         return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+    preserved = (limit - 60) // 2
+    return text[:preserved] + "(...)" + text[-preserved:]

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
-MAX_TOOL_OUTPUT = 4000
+MAX_TOOL_OUTPUT = 5000
 MAX_HISTORY = 12000
 # 这些文件最可能直接影响 agent 的行动方式。
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
@@ -25,10 +25,12 @@ def now() -> str:
 
 
 def clip(text: object, limit: int = MAX_TOOL_OUTPUT) -> str:
+    """保留过长文本的首尾内容，避免丢失工具输出结论。"""
     text = str(text)
-    if len(text) <= limit:
+    if len(text) < limit:
         return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+    preserved = (limit - 60) // 2
+    return text[:preserved] + "(...)" + text[-preserved:]
 
 
 def middle(text: object, limit: int) -> str:
