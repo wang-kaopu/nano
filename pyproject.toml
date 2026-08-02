@@ -18,11 +18,20 @@ pico = "pico.cli:main"
 [dependency-groups]
 dev = [
   "pytest>=8.3.5",
+  "pyright>=1.1.400",
   "ruff>=0.4.4",
 ]
 
+[tool.pyright]
+include = ["pico"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+
 [tool.setuptools.packages.find]
 include = ["pico*"]
+
+[tool.setuptools.package-data]
+pico = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

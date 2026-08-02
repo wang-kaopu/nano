@@ -9,20 +9,23 @@ import hashlib
 import os
 import re
 import uuid
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from . import checkpoint as checkpointlib
 from .features import memory as memorylib
 from . import security as securitylib
 from .context_manager import ContextManager
 from .checkpoint import CHECKPOINT_NONE_STATUS
-from .prompt_prefix import build_prompt_prefix, tool_signature
+from .prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
 from .run_store import RunStore
 from .security import REDACTED_VALUE
 from .session_store import SessionStore
 from .tool_context import ToolContext
 from .tool_executor import ToolExecutor
+from .types import JsonObject, ModelClient
 from . import tools as toolkit
 from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
 
@@ -53,22 +56,22 @@ __all__ = ["Pico", "SessionStore"]
 class Pico:
     def __init__(
         self,
-        model_client,
-        workspace,
-        session_store,
-        session=None,
-        run_store=None,
-        approval_policy="ask",
-        max_steps=6,
-        max_new_tokens=512,
-        depth=0,
-        max_depth=1,
-        read_only=False,
-        shell_env_allowlist=None,
-        secret_env_names=None,
-        feature_flags=None,
-        allowed_tools=None,
-    ):
+        model_client: ModelClient,
+        workspace: WorkspaceContext,
+        session_store: SessionStore,
+        session: dict[str, Any] | None = None,
+        run_store: RunStore | None = None,
+        approval_policy: str = "ask",
+        max_steps: int = 6,
+        max_new_tokens: int = 512,
+        depth: int = 0,
+        max_depth: int = 1,
+        read_only: bool = False,
+        shell_env_allowlist: Iterable[str] | None = None,
+        secret_env_names: Iterable[str] | None = None,
+        feature_flags: Mapping[str, bool] | None = None,
+        allowed_tools: Iterable[str] | None = None,
+    ) -> None:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
@@ -120,7 +123,14 @@ class Pico:
         }
 
     @classmethod
-    def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
+    def from_session(
+        cls,
+        model_client: ModelClient,
+        workspace: WorkspaceContext,
+        session_store: SessionStore,
+        session_id: str,
+        **kwargs: Any,
+    ) -> "Pico":
         return cls(
             model_client=model_client,
             workspace=workspace,
@@ -129,7 +139,7 @@ class Pico:
             **kwargs,
         )
 
-    def _ensure_session_shape(self):
+    def _ensure_session_shape(self) -> None:
         self.session.setdefault("history", [])
         self.session.setdefault("memory", memorylib.default_memory_state())
         checkpoints = self.session.setdefault("checkpoints", {})
@@ -145,28 +155,28 @@ class Pico:
         if not isinstance(resume_state, dict):
             self.session["resume_state"] = {}
 
-    def current_runtime_identity(self):
+    def current_runtime_identity(self) -> JsonObject:
         return checkpointlib.current_runtime_identity(self)
 
-    def checkpoint_state(self):
+    def checkpoint_state(self) -> dict[str, Any]:
         return checkpointlib.checkpoint_state(self)
 
-    def current_checkpoint(self):
+    def current_checkpoint(self) -> dict[str, Any] | None:
         return checkpointlib.current_checkpoint(self)
 
-    def invalidate_stale_memory(self):
+    def invalidate_stale_memory(self) -> list[str]:
         invalidated = self.memory.invalidate_stale_file_summaries()
         self.session["memory"] = self.memory.to_dict()
         return invalidated
 
-    def evaluate_resume_state(self):
+    def evaluate_resume_state(self) -> dict[str, Any]:
         return checkpointlib.evaluate_resume_state(self)
 
-    def render_checkpoint_text(self):
+    def render_checkpoint_text(self) -> str:
         return checkpointlib.render_checkpoint_text(self)
 
     @staticmethod
-    def remember(bucket, item, limit):
+    def remember(bucket: list[Any], item: Any, limit: int) -> None:
         if not item:
             return
         if item in bucket:
@@ -174,11 +184,11 @@ class Pico:
         bucket.append(item)
         del bucket[:-limit]
 
-    def build_tools(self):
+    def build_tools(self) -> dict[str, dict[str, Any]]:
         return toolkit.build_tool_registry(self.tool_context())
 
     @staticmethod
-    def _normalize_allowed_tools(allowed_tools):
+    def _normalize_allowed_tools(allowed_tools: Iterable[str] | None) -> tuple[str, ...] | None:
         if allowed_tools is None:
             return None
         normalized = tuple(str(name).strip() for name in allowed_tools)
@@ -186,7 +196,7 @@ class Pico:
             raise ValueError("allowed_tools must be a non-empty sequence of tool names")
         return normalized
 
-    def _apply_tool_allowlist(self, tools):
+    def _apply_tool_allowlist(self, tools: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if self.allowed_tools is None:
             return tools
         legal_names = toolkit.legal_tool_names()
@@ -200,17 +210,17 @@ class Pico:
             if name in allowed
         }
 
-    def tool_signature(self):
+    def tool_signature(self) -> str:
         return tool_signature(self.tools)
 
-    def build_prefix(self):
+    def build_prefix(self) -> PromptPrefix:
         return build_prompt_prefix(workspace=self.workspace, tools=self.tools)
 
-    def _apply_prefix_state(self, prefix_state):
+    def _apply_prefix_state(self, prefix_state: PromptPrefix) -> None:
         self.prefix_state = prefix_state
         self.prefix = prefix_state.text
 
-    def refresh_prefix(self, force=False):
+    def refresh_prefix(self, force: bool = False) -> dict[str, bool]:
         previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
         previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
 
@@ -233,10 +243,10 @@ class Pico:
         }
         return dict(self._last_prefix_refresh)
 
-    def memory_text(self):
+    def memory_text(self) -> str:
         return self.memory.render_memory_text()
 
-    def history_text(self):
+    def history_text(self) -> str:
         history = self.session["history"]
         if not history:
             return "- empty"
@@ -262,18 +272,18 @@ class Pico:
 
         return clip("\n".join(lines), MAX_HISTORY)
 
-    def feature_enabled(self, name):
+    def feature_enabled(self, name: str) -> bool:
         return bool(self.feature_flags.get(str(name), False))
 
-    def prompt(self, user_message):
+    def prompt(self, user_message: str) -> str:
         prompt, _ = self._build_prompt_and_metadata(user_message)
         return prompt
 
-    def record(self, item):
+    def record(self, item: dict[str, Any]) -> None:
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
 
-    def record_conversation(self, item):
+    def record_conversation(self, item: dict[str, Any]) -> None:
         """追加一条模型消息，并在第六条后仅保留最新三条。"""
         conversation = self.session.setdefault("conversation", [])
         conversation.append(item)

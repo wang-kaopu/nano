@@ -297,6 +297,8 @@ def _run_memory_variant(mode):
 
         result = agent.ask("What color is the deploy key?")
         task_state = agent.current_task_state
+        if task_state is None:
+            raise RuntimeError("memory experiment completed without task state")
         model_client = agent.model_client
         return {
             "correct": result.strip().lower() == "deploy key is red.",
@@ -392,6 +394,8 @@ def _run_memory_task_variant(task, variant):
             _set_irrelevant_memory_for_task(agent)
         result = agent.ask(_followup_prompt(task))
         task_state = agent.current_task_state
+        if task_state is None:
+            raise RuntimeError("memory experiment completed without task state")
         return {
             "correct": result.strip().lower() == f"{task['fact']}.",
             "tool_steps": int(task_state.tool_steps),
@@ -759,7 +763,8 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
             providers.append(profile)
             continue
         if provider_name == "gpt":
-            def factory(task, workspace, profile=profile):
+            def openai_factory(task, workspace, profile=profile):
+                """为当前实验 provider 创建 OpenAI-compatible 客户端。"""
                 del task, workspace
                 return OpenAICompatibleModelClient(
                     model=profile["model"],
@@ -768,8 +773,10 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
                     temperature=0.0,
                     timeout=300,
                 )
+            model_client_factory = openai_factory
         else:
-            def factory(task, workspace, profile=profile):
+            def anthropic_factory(task, workspace, profile=profile):
+                """为当前实验 provider 创建 Anthropic-compatible 客户端。"""
                 del task, workspace
                 return AnthropicCompatibleModelClient(
                     model=profile["model"],
@@ -778,6 +785,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
                     temperature=0.0,
                     timeout=300,
                 )
+            model_client_factory = anthropic_factory
         artifact_path = artifact_root / f"{provider_name}-benchmark.json"
         try:
             payload = run_fixed_benchmark(
@@ -787,7 +795,7 @@ def run_provider_experiments(benchmark_path, workspace_root, artifact_root, max_
                 model_name=profile["provider"],
                 model_version=profile["model"],
                 max_new_tokens=max_new_tokens,
-                model_client_factory=factory,
+                model_client_factory=model_client_factory,
             )
             payload["_artifact_path"] = str(artifact_path)
             result = _provider_summary_from_artifact(payload)
@@ -887,13 +895,16 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
                             "Reply with the exact line only. If you are not certain, verify with tools instead of guessing."
                         )
                     answer = agent.ask(prompt)
+                    task_state = agent.current_task_state
+                    if task_state is None:
+                        raise RuntimeError("memory experiment completed without task state")
                     variants[variant].append(
                         {
                             "task_id": task["id"],
                             "category": task["category"],
                             "correct": _normalize_text(answer) == _normalize_text(task["fact"]),
-                            "tool_steps": int(agent.current_task_state.tool_steps),
-                            "attempts": int(agent.current_task_state.attempts),
+                            "tool_steps": int(task_state.tool_steps),
+                            "attempts": int(task_state.attempts),
                             "repeated_reads": _followup_trace_metrics(agent),
                         }
                     )
@@ -1526,10 +1537,13 @@ def _run_recovery_task_variant(task, variant):
             agent.session.pop("checkpoints", None)
             agent.session_store.save(agent.session)
         final_answer = agent.ask("Continue the recovery task.")
-        report = agent.run_store.load_report(agent.current_task_state.run_id)
+        task_state = agent.current_task_state
+        if task_state is None:
+            raise RuntimeError("recovery experiment completed without task state")
+        report = agent.run_store.load_report(task_state.run_id)
         trace = [
             json.loads(line)
-            for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+            for line in agent.run_store.trace_path(task_state).read_text(encoding="utf-8").splitlines()
         ]
         resume_status = str(report.get("prompt_metadata", {}).get("resume_status", ""))
         stale_reanchored = any(

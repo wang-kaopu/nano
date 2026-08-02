@@ -90,7 +90,7 @@ def _effective_model(args, provider):
 
 
 def _configured_secret_names(args):
-    configured_secret_names = set(DEFAULT_SECRET_ENV_NAMES)
+    configured_secret_names: set[str] = set(DEFAULT_SECRET_ENV_NAMES)
     configured_secret_names.update(str(name).upper() for name in args.secret_env_names)
     extra_names = os.environ.get(SECRET_ENV_NAMES_VAR, "")
     if extra_names.strip():

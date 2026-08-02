@@ -7,16 +7,19 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 
 import json
 import time
+from collections.abc import AsyncIterator, Iterable, Mapping
+from typing import Any
 
 import httpx
 
 from ..query_events import ModelStreamEvent
 from ..schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
+from ..types import JsonObject
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
 
 
-def _validate_json_response(body_text, model):
+def _validate_json_response(body_text: str, model: type[Any]) -> JsonObject:
     """将 provider JSON 响应校验为指定 Pydantic 模型并返回字典。"""
     try:
         return model.model_validate_json(body_text).model_dump(mode="python")
@@ -24,7 +27,7 @@ def _validate_json_response(body_text, model):
         raise RuntimeError("Provider returned invalid JSON response schema") from exc
 
 
-def _response_text(response):
+def _response_text(response: Any) -> str:
     """读取 HTTPX 响应文本，并保留测试替身的兼容读取方式。"""
     text = getattr(response, "text", None)
     if text is not None:
@@ -32,12 +35,18 @@ def _response_text(response):
     return response.read().decode("utf-8")
 
 
-def _response_status_code(response):
+def _response_status_code(response: Any) -> int:
     """返回响应状态码，缺少该属性的轻量测试替身视为成功。"""
     return int(getattr(response, "status_code", 200))
 
 
-def _request_with_retries(url, payload, headers, timeout, attempts=1):
+def _request_with_retries(
+    url: str,
+    payload: JsonObject,
+    headers: Mapping[str, str],
+    timeout: float,
+    attempts: int = 1,
+) -> httpx.Response:
     """发送 JSON POST 请求，并对网络错误和 5xx 响应执行有限重试。"""
     last_error = None
     for attempt in range(attempts):
@@ -58,13 +67,15 @@ def _request_with_retries(url, payload, headers, timeout, attempts=1):
 
 
 class FakeModelClient:
-    def __init__(self, outputs):
+    """为测试和基准提供可预测的模型客户端。"""
+
+    def __init__(self, outputs: Iterable[str | list[str]]) -> None:
         self.outputs = list(outputs)
         self.prompts = []
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
+    def complete(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> str | list[str]:
         """为同步调用方返回下一条预设的完整响应。"""
         self.prompts.append(prompt)
         if not getattr(self, "last_completion_metadata", None):
@@ -73,7 +84,7 @@ class FakeModelClient:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
 
-    async def stream(self, prompt, max_new_tokens, **kwargs):
+    async def stream(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
         """将下一条预设响应作为确定性的文本流产出。"""
         raw = self.complete(prompt, max_new_tokens, **kwargs)
         chunks = raw if isinstance(raw, list) else [raw]
@@ -83,7 +94,9 @@ class FakeModelClient:
 
 
 class OllamaModelClient:
-    def __init__(self, model, host, temperature, top_p, timeout):
+    """通过 Ollama generate API 请求模型。"""
+
+    def __init__(self, model: str, host: str, temperature: float | None, top_p: float | None, timeout: float) -> None:
         self.model = model
         self.host = host.rstrip("/")
         self.temperature = temperature
@@ -92,7 +105,7 @@ class OllamaModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, **kwargs):
+    def complete(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> str:
         """请求一条非流式 Ollama 完成响应。"""
         # Ollama 当前不支持我们这里接入的 prompt cache 语义，
         # 所以 runtime 传下来的缓存参数会被忽略。
@@ -132,7 +145,7 @@ class OllamaModelClient:
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
 
-    async def stream(self, prompt, max_new_tokens, **kwargs):
+    async def stream(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
         """将 Ollama generate 分块转换为标准化模型事件。"""
         del kwargs
         self.last_completion_metadata = {}
@@ -174,14 +187,14 @@ class OllamaModelClient:
             yield ModelStreamEvent("error", metadata={"message": f"Ollama stream failed: {exc}"})
 
 
-def _normalize_versioned_base_url(base_url):
+def _normalize_versioned_base_url(base_url: str) -> str:
     base = str(base_url).rstrip("/")
     if not base.endswith("/v1"):
         base += "/v1"
     return base
 
 
-def _extract_openai_text(data):
+def _extract_openai_text(data: JsonObject) -> str:
     if data.get("output_text"):
         return data["output_text"]
 
@@ -208,7 +221,7 @@ def _extract_openai_text(data):
     return ""
 
 
-def _extract_openai_text_from_sse(body_text):
+def _extract_openai_text_from_sse(body_text: str) -> str:
     last_response = None
     deltas = []
     for line in body_text.splitlines():
@@ -258,7 +271,7 @@ def _extract_openai_text_from_sse(body_text):
     return ""
 
 
-def _extract_openai_response_from_sse(body_text):
+def _extract_openai_response_from_sse(body_text: str) -> tuple[str, JsonObject]:
     last_response = None
     deltas = []
     for line in body_text.splitlines():
@@ -299,7 +312,7 @@ def _extract_openai_response_from_sse(body_text):
     return "", {}
 
 
-def _extract_usage_cache_details(data):
+def _extract_usage_cache_details(data: JsonObject) -> JsonObject:
     # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
     # 让 runtime/trace/report 不需要关心 provider 细节。
     usage = data.get("usage") or {}
@@ -317,7 +330,9 @@ def _extract_usage_cache_details(data):
 
 
 class OpenAICompatibleModelClient:
-    def __init__(self, model, base_url, api_key, temperature, timeout):
+    """通过 OpenAI-compatible Responses API 请求模型。"""
+
+    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float) -> None:
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
@@ -328,7 +343,13 @@ class OpenAICompatibleModelClient:
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    def complete(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+    ) -> str:
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
         为什么存在：
@@ -433,7 +454,13 @@ class OpenAICompatibleModelClient:
         }
         return _extract_openai_text(data)
 
-    async def stream(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    async def stream(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
         """将 OpenAI Responses SSE 事件转换为文本增量和完成元数据。"""
         self.last_completion_metadata = {}
         payload = {
@@ -496,7 +523,7 @@ class OpenAICompatibleModelClient:
             yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible stream failed: {exc}"})
 
 
-def _extract_anthropic_text(data):
+def _extract_anthropic_text(data: JsonObject) -> str:
     for item in data.get("content", []):
         if isinstance(item, dict) and item.get("type") == "text":
             text = item.get("text")
@@ -506,7 +533,9 @@ def _extract_anthropic_text(data):
 
 
 class AnthropicCompatibleModelClient:
-    def __init__(self, model, base_url, api_key, temperature, timeout):
+    """通过 Anthropic-compatible Messages API 请求模型。"""
+
+    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float) -> None:
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
@@ -515,7 +544,13 @@ class AnthropicCompatibleModelClient:
         self.supports_prompt_cache = False
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    def complete(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+    ) -> str:
         """请求一条非流式 Anthropic 兼容完成响应。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
         # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
@@ -578,7 +613,13 @@ class AnthropicCompatibleModelClient:
             return text
         raise RuntimeError("Anthropic-compatible error: could not extract text from response")
 
-    async def stream(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+    async def stream(
+        self,
+        prompt: str,
+        max_new_tokens: int,
+        prompt_cache_key: str | None = None,
+        prompt_cache_retention: str | None = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
         """将 Anthropic Messages SSE 事件转换为标准化文本增量。"""
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}

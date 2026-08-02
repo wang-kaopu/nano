@@ -56,6 +56,12 @@ uv sync
 pip install -e .
 ```
 
+开发时可运行静态类型检查：
+
+```bash
+uv run pyright
+```
+
 ## 快速开始
 
 在当前仓库里启动交互模式。默认 provider 是 DeepSeek：

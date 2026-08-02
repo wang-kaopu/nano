@@ -4,18 +4,17 @@ import os
 import re
 from pathlib import Path
 
-
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-def _strip_quotes(value):
+def _strip_quotes(value: str) -> str:
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
 
 
-def _parse_env_line(line):
+def _parse_env_line(line: str) -> tuple[str, str] | None:
     line = line.strip()
     if not line or line.startswith("#"):
         return None
@@ -30,7 +29,7 @@ def _parse_env_line(line):
     return name, _strip_quotes(value)
 
 
-def find_project_env(start):
+def find_project_env(start: str | Path) -> Path | None:
     current = Path(start).resolve()
     if current.is_file():
         current = current.parent
@@ -41,7 +40,7 @@ def find_project_env(start):
     return None
 
 
-def load_project_env(start, override=True):
+def load_project_env(start: str | Path, override: bool = True) -> dict[str, str]:
     env_path = find_project_env(start)
     if env_path is None:
         return {}
@@ -57,7 +56,7 @@ def load_project_env(start, override=True):
     return loaded
 
 
-def provider_env(name, legacy_names=(), default=""):
+def provider_env(name: str, legacy_names: tuple[str, ...] = (), default: str = "") -> str:
     for env_name in (name, *legacy_names):
         value = os.environ.get(env_name)
         if value:

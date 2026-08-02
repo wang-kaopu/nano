@@ -479,7 +479,10 @@ class BenchmarkEvaluator:
 
         final_answer = agent.ask(task["prompt"])
         task_state = agent.current_task_state
-        run_dir = Path(agent.current_run_dir)
+        run_dir = agent.current_run_dir
+        if task_state is None or run_dir is None:
+            raise RuntimeError("benchmark task completed without run artifacts")
+        run_dir = Path(run_dir)
         task_state_path = agent.run_store.task_state_path(task_state)
         report_path = agent.run_store.report_path(task_state)
         report = agent.run_store.load_report(task_state.run_id)

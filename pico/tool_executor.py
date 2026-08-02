@@ -2,11 +2,13 @@
 
 import asyncio
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .workspace import clip
+from .types import JsonObject, ToolArguments
 
 
 class ToolExecutionMetadata(BaseModel):
@@ -31,20 +33,20 @@ class ToolExecutionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     content: str
-    metadata: dict[str, Any]
+    metadata: JsonObject
 
 
 def _metadata(
-    tool_status,
-    tool_error_code="",
-    security_event_type="",
-    risk_level="low",
-    read_only=True,
-    affected_paths=None,
-    workspace_changed=False,
-    workspace_fingerprint="",
-    diff_summary=None,
-):
+    tool_status: str,
+    tool_error_code: str = "",
+    security_event_type: str = "",
+    risk_level: str = "low",
+    read_only: bool = True,
+    affected_paths: Iterable[str] | None = None,
+    workspace_changed: bool = False,
+    workspace_fingerprint: str = "",
+    diff_summary: Iterable[str] | None = None,
+) -> JsonObject:
     """创建并序列化工具审计元数据。"""
     return ToolExecutionMetadata(
         tool_status=tool_status,
@@ -62,11 +64,11 @@ def _metadata(
 class ToolExecutor:
     """执行工具并统一处理校验、审批、审计和异常。"""
 
-    def __init__(self, agent):
+    def __init__(self, agent: Any) -> None:
         """绑定运行时 agent。"""
         self.agent = agent
 
-    def execute(self, name, args):
+    def execute(self, name: str, args: ToolArguments) -> ToolExecutionResult:
         """执行一次工具调用并返回结构化结果。"""
         agent = self.agent
         if agent.allowed_tools is not None and name not in agent.allowed_tools:
@@ -184,6 +186,6 @@ class ToolExecutor:
             agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
 
-    async def execute_async(self, name, args):
+    async def execute_async(self, name: str, args: ToolArguments) -> ToolExecutionResult:
         """在不阻塞事件循环的前提下执行同步安全闸口。"""
         return await asyncio.to_thread(self.execute, name, args)

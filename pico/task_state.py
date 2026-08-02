@@ -5,7 +5,7 @@
 """
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,6 +14,7 @@ STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_STOPPED = "stopped"
 STATUS_FAILED = "failed"
+TaskStatus = Literal["running", "completed", "stopped", "failed"]
 
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 STOP_REASON_STEP_LIMIT_REACHED = "step_limit_reached"
@@ -34,7 +35,7 @@ class TaskState(BaseModel):
     run_id: str
     task_id: str
     user_request: str
-    status: Literal[STATUS_RUNNING, STATUS_COMPLETED, STATUS_STOPPED, STATUS_FAILED] = STATUS_RUNNING
+    status: TaskStatus = STATUS_RUNNING
     tool_steps: int = Field(default=0, ge=0)
     attempts: int = Field(default=0, ge=0)
     last_tool: str = ""
@@ -44,31 +45,31 @@ class TaskState(BaseModel):
     resume_status: str = ""
 
     @classmethod
-    def create(cls, task_id, user_request, run_id=""):
+    def create(cls, task_id: str, user_request: str, run_id: str = "") -> "TaskState":
         """创建一个新的运行状态并生成运行 ID。"""
         if not run_id:
             run_id = "run_" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid4().hex[:6]
         return cls(run_id=run_id, task_id=task_id, user_request=user_request)
 
     @classmethod
-    def from_dict(cls, data):
+    def from_dict(cls, data: dict[str, Any]) -> "TaskState":
         """从结构化数据校验并恢复运行状态。"""
         return cls.model_validate(data)
 
-    def record_attempt(self):
+    def record_attempt(self) -> "TaskState":
         """记录一次模型调用尝试。"""
         # attempt 统计的是“模型被调用了几轮”，不等于 tool_steps。
         self.attempts += 1
         return self
 
-    def record_tool(self, name):
+    def record_tool(self, name: str) -> "TaskState":
         """记录一次实际执行的工具调用。"""
         # tool_steps 只统计真正进入执行阶段的工具调用次数。
         self.tool_steps += 1
         self.last_tool = str(name or "")
         return self
 
-    def stop(self, stop_reason, status=STATUS_STOPPED, final_answer=""):
+    def stop(self, stop_reason: str, status: TaskStatus = STATUS_STOPPED, final_answer: str = "") -> "TaskState":
         """以指定停止原因结束当前运行。"""
         # stop_reason 和 status 分开存，是为了区分“怎么停的”和“停下时是什么状态”。
         self.status = status
@@ -77,25 +78,25 @@ class TaskState(BaseModel):
             self.final_answer = final_answer
         return self
 
-    def stop_step_limit(self, final_answer=""):
+    def stop_step_limit(self, final_answer: str = "") -> "TaskState":
         """标记运行达到最大步数。"""
         return self.stop(STOP_REASON_STEP_LIMIT_REACHED, final_answer=final_answer)
 
-    def stop_retry_limit(self, final_answer=""):
+    def stop_retry_limit(self, final_answer: str = "") -> "TaskState":
         """标记运行达到模型重试上限。"""
         return self.stop(STOP_REASON_RETRY_LIMIT_REACHED, final_answer=final_answer)
 
-    def stop_model_error(self, final_answer=""):
+    def stop_model_error(self, final_answer: str = "") -> "TaskState":
         """标记模型调用失败。"""
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)
 
-    def finish_success(self, final_answer):
+    def finish_success(self, final_answer: str) -> "TaskState":
         """标记运行成功并保存最终答案。"""
         self.status = STATUS_COMPLETED
         self.stop_reason = STOP_REASON_FINAL_ANSWER_RETURNED
         self.final_answer = str(final_answer)
         return self
 
-    def to_dict(self):
+    def to_dict(self) -> dict[str, Any]:
         """返回用于 JSON 持久化的状态字典。"""
         return self.model_dump(mode="json")

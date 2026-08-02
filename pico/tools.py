@@ -8,11 +8,13 @@ import shutil
 import subprocess
 import textwrap
 from functools import partial
-from typing import Annotated, Type
+from typing import Annotated, Any, Type
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from .workspace import IGNORED_PATH_NAMES
+from .tool_context import ToolContext
+from .types import ToolArguments as ToolArgumentsPayload
 
 
 class ToolArguments(BaseModel):
@@ -38,7 +40,7 @@ class ReadFileArguments(ToolArguments):
     end: int = Field(default=200, ge=1)
 
     @model_validator(mode="after")
-    def validate_line_range(self):
+    def validate_line_range(self) -> "ReadFileArguments":
         """确保结束行不早于起始行。"""
         if self.end < self.start:
             raise ValueError("end must be greater than or equal to start")
@@ -92,7 +94,7 @@ TOOL_ARGUMENT_MODELS: dict[str, Type[ToolArguments]] = {
 }
 
 
-def tool_arguments_model(name):
+def tool_arguments_model(name: str) -> Type[ToolArguments]:
     """返回工具名称对应的 Pydantic 参数模型。"""
     try:
         return TOOL_ARGUMENT_MODELS[name]
@@ -100,12 +102,12 @@ def tool_arguments_model(name):
         raise ValueError(f"unknown tool: {name}") from exc
 
 
-def tool_json_schema(name):
+def tool_json_schema(name: str) -> dict[str, Any]:
     """返回供模型调用协议使用的 JSON Schema。"""
     return tool_arguments_model(name).model_json_schema()
 
 
-def validate_tool_arguments(name, args):
+def validate_tool_arguments(name: str, args: ToolArgumentsPayload | None) -> dict[str, Any]:
     """校验工具参数并返回规范化后的普通字典。"""
     try:
         model = tool_arguments_model(name).model_validate(args or {})
@@ -114,7 +116,7 @@ def validate_tool_arguments(name, args):
     return model.model_dump(mode="python")
 
 
-def _human_schema(model):
+def _human_schema(model: Type[ToolArguments]) -> dict[str, str]:
     """把 Pydantic 字段转换为 prompt 中使用的简短字段描述。"""
     schema = model.model_json_schema()
     properties = schema.get("properties", {})
@@ -175,7 +177,7 @@ DELEGATE_TOOL_SPEC["json_schema"] = tool_json_schema("delegate")
 DELEGATE_TOOL_SPEC["schema"] = _human_schema(DELEGATE_TOOL_SPEC["args_model"])
 
 
-def legal_tool_names():
+def legal_tool_names() -> set[str]:
     return set(BASE_TOOL_SPECS) | {"delegate"}
 
 TOOL_EXAMPLES = {
@@ -189,7 +191,7 @@ TOOL_EXAMPLES = {
 }
 
 
-def build_tool_registry(context):
+def build_tool_registry(context: ToolContext) -> dict[str, dict[str, Any]]:
     # 工具不是动态发现的，而是显式注册的。
     # 这样模型看到的是一个有边界、可审计的动作集合。
     tools = {
@@ -203,11 +205,11 @@ def build_tool_registry(context):
     return tools
 
 
-def tool_example(name):
+def tool_example(name: str) -> str:
     return TOOL_EXAMPLES.get(name, "")
 
 
-def validate_tool(context, name, args):
+def validate_tool(context: ToolContext, name: str, args: ToolArgumentsPayload | None) -> dict[str, Any]:
     args = validate_tool_arguments(name, args)
 
     if name == "list_files":
@@ -275,8 +277,10 @@ def validate_tool(context, name, args):
             raise ValueError("delegate depth exceeded")
         return args
 
+    raise ValueError(f"unknown tool: {name}")
 
-def tool_list_files(context, args):
+
+def tool_list_files(context: ToolContext, args: ToolArgumentsPayload) -> str:
     path = context.path(args.get("path", "."))
     if not path.is_dir():
         raise ValueError("path is not a directory")
@@ -291,7 +295,7 @@ def tool_list_files(context, args):
     return "\n".join(lines) or "(empty)"
 
 
-def tool_read_file(context, args):
+def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     path = context.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
@@ -304,7 +308,7 @@ def tool_read_file(context, args):
     return f"# {path.relative_to(context.root)}\n{body}"
 
 
-def tool_search(context, args):
+def tool_search(context: ToolContext, args: ToolArgumentsPayload) -> str:
     pattern = str(args.get("pattern", "")).strip()
     if not pattern:
         raise ValueError("pattern must not be empty")
@@ -334,7 +338,7 @@ def tool_search(context, args):
     return "\n".join(matches) or "(no matches)"
 
 
-def tool_run_shell(context, args):
+def tool_run_shell(context: ToolContext, args: ToolArgumentsPayload) -> str:
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
@@ -363,7 +367,7 @@ def tool_run_shell(context, args):
     ).strip()
 
 
-def tool_write_file(context, args):
+def tool_write_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     path = context.path(args["path"])
     content = str(args["content"])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,7 +375,7 @@ def tool_write_file(context, args):
     return f"wrote {path.relative_to(context.root)} ({len(content)} chars)"
 
 
-def tool_patch_file(context, args):
+def tool_patch_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     path = context.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
@@ -388,7 +392,7 @@ def tool_patch_file(context, args):
     return f"patched {path.relative_to(context.root)}"
 
 
-def tool_delegate(context, args):
+def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
     if context.depth >= context.max_depth:
         raise ValueError("delegate depth exceeded")
     task = str(args.get("task", "")).strip()

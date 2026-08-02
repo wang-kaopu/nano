@@ -1,26 +1,32 @@
 """Security and redaction helpers for runtime artifacts."""
 
 import os
+from collections.abc import Iterable
+from pathlib import Path
+
+from .types import Environment, JsonValue
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"
 
 
-def _normalized_secret_names(secret_env_names):
+def _normalized_secret_names(secret_env_names: Iterable[str] | None) -> set[str]:
     return {str(name).upper() for name in (secret_env_names or ())}
 
 
-def looks_sensitive_env_name(name):
+def looks_sensitive_env_name(name: str) -> bool:
     upper = str(name).upper()
     return any(upper == marker or upper.endswith(marker) or upper.endswith(f"_{marker}") for marker in SENSITIVE_ENV_NAME_MARKERS)
 
 
-def is_secret_env_name(name, secret_env_names=None):
+def is_secret_env_name(name: str, secret_env_names: Iterable[str] | None = None) -> bool:
     upper = str(name).upper()
     return upper in _normalized_secret_names(secret_env_names) or looks_sensitive_env_name(upper)
 
 
-def configured_secret_env_items(env=None, secret_env_names=None):
+def configured_secret_env_items(
+    env: Environment | None = None, secret_env_names: Iterable[str] | None = None
+) -> list[tuple[str, str]]:
     env = os.environ if env is None else env
     configured_names = _normalized_secret_names(secret_env_names)
     items = [
@@ -32,7 +38,9 @@ def configured_secret_env_items(env=None, secret_env_names=None):
     return items
 
 
-def detected_secret_env_items(env=None, secret_env_names=None):
+def detected_secret_env_items(
+    env: Environment | None = None, secret_env_names: Iterable[str] | None = None
+) -> list[tuple[str, str]]:
     env = os.environ if env is None else env
     items = [
         (name, value)
@@ -43,7 +51,9 @@ def detected_secret_env_items(env=None, secret_env_names=None):
     return items
 
 
-def secret_env_summary(env=None, secret_env_names=None):
+def secret_env_summary(
+    env: Environment | None = None, secret_env_names: Iterable[str] | None = None
+) -> dict[str, int | list[str]]:
     names = [name for name, _ in configured_secret_env_items(env=env, secret_env_names=secret_env_names)]
     return {
         "secret_env_count": len(names),
@@ -51,7 +61,9 @@ def secret_env_summary(env=None, secret_env_names=None):
     }
 
 
-def detected_secret_env_summary(env=None, secret_env_names=None):
+def detected_secret_env_summary(
+    env: Environment | None = None, secret_env_names: Iterable[str] | None = None
+) -> dict[str, int | list[str]]:
     names = [name for name, _ in detected_secret_env_items(env=env, secret_env_names=secret_env_names)]
     return {
         "secret_env_count": len(names),
@@ -59,7 +71,7 @@ def detected_secret_env_summary(env=None, secret_env_names=None):
     }
 
 
-def redact_text(text, env=None, secret_env_names=None):
+def redact_text(text: object, env: Environment | None = None, secret_env_names: Iterable[str] | None = None) -> str:
     text = str(text)
     for _, value in sorted(
         detected_secret_env_items(env=env, secret_env_names=secret_env_names),
@@ -70,7 +82,12 @@ def redact_text(text, env=None, secret_env_names=None):
     return text
 
 
-def redact_artifact(value, key=None, env=None, secret_env_names=None):
+def redact_artifact(
+    value: JsonValue,
+    key: str | None = None,
+    env: Environment | None = None,
+    secret_env_names: Iterable[str] | None = None,
+) -> JsonValue:
     if key and is_secret_env_name(key, secret_env_names=secret_env_names):
         return REDACTED_VALUE
     if isinstance(value, dict):
@@ -87,7 +104,11 @@ def redact_artifact(value, key=None, env=None, secret_env_names=None):
     return value
 
 
-def shell_env(env=None, allowlist=(), root="."):
+def shell_env(
+    env: Environment | None = None,
+    allowlist: Iterable[str] = (),
+    root: str | Path = ".",
+) -> dict[str, str]:
     env = os.environ if env is None else env
     filtered = {
         name: env[name]
