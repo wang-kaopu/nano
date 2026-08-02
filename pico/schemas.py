@@ -54,6 +54,7 @@ class SessionModel(BaseModel):
     created_at: str = ""
     workspace_root: str = ""
     history: list[dict[str, Any]] = Field(default_factory=list)
+    conversation: list[dict[str, Any]] = Field(default_factory=list)
     memory: dict[str, Any] = Field(default_factory=dict)
     checkpoints: CheckpointStateModel = Field(default_factory=CheckpointStateModel)
     runtime_identity: dict[str, Any] = Field(default_factory=dict)

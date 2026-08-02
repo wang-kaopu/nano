@@ -189,7 +189,7 @@ class ContextManager:
         else:
             relevant_lines.append("- none")
         relevant_raw = "\n".join(relevant_lines)
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._model_history()
         history_raw = self._raw_history_text(history)
         return {
             "prefix": SectionRender(raw=section_texts["prefix"], budget=len(section_texts["prefix"]), rendered=section_texts["prefix"], details={}),
@@ -295,7 +295,7 @@ class ContextManager:
         return max(1, usable // note_count)
 
     def _render_history_section(self, budget):
-        history = list(getattr(self.agent, "session", {}).get("history", []))
+        history = self._model_history()
         raw = self._raw_history_text(history)
         if not history:
             rendered = "Transcript:\n- empty"
@@ -428,15 +428,23 @@ class ContextManager:
         lines = []
         for item in history:
             if item["role"] == "tool":
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                lines.append(f"[tool:{item['name']}] {json.dumps(item.get('args', {}), sort_keys=True)}")
                 lines.append(str(item["content"]))
             else:
                 lines.append(f"[{item['role']}] {item['content']}")
         return "\n".join(["Transcript:", *lines])
 
+    def _model_history(self):
+        """流式循环创建短对话后，优先返回该模型侧消息窗口。"""
+        session = getattr(self.agent, "session", {})
+        conversation = session.get("conversation")
+        if isinstance(conversation, list) and conversation:
+            return list(conversation)
+        return list(session.get("history", []))
+
     def _render_history_item(self, item, line_limit):
         if item["role"] == "tool":
-            prefix = f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
+            prefix = f"[tool:{item['name']}] {json.dumps(item.get('args', {}), sort_keys=True)}"
             content = _tail_clip(item["content"], max(20, line_limit))
             return [prefix, content]
         return [f"[{item['role']}] {_tail_clip(item['content'], line_limit)}"]

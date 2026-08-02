@@ -273,6 +273,14 @@ class Pico:
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
 
+    def record_conversation(self, item):
+        """追加一条模型消息，并在第六条后仅保留最新三条。"""
+        conversation = self.session.setdefault("conversation", [])
+        conversation.append(item)
+        if len(conversation) >= 6:
+            del conversation[:-3]
+        self.session_path = self.session_store.save(self.session)
+
     @staticmethod
     def looks_sensitive_env_name(name):
         return securitylib.looks_sensitive_env_name(name)
@@ -500,9 +508,16 @@ class Pico:
         return promoted, rejections, superseded
 
     def ask(self, user_message):
-        from .agent_loop import AgentLoop
+        """为面向终端的同步公共接口执行一条请求。"""
+        from .agent_loop import QueryEngine
 
-        return AgentLoop(self).run(user_message)
+        return QueryEngine(self).run(user_message)
+
+    async def ask_async(self, user_message):
+        """异步执行一条请求并返回最终答案。"""
+        from .agent_loop import QueryEngine
+
+        return await QueryEngine(self).run_async(user_message)
 
     def execute_tool(self, name, args):
         result = self.tool_executor.execute(name, args)
@@ -767,7 +782,9 @@ class Pico:
         return text[start:end]
 
     def reset(self):
+        """清空持久化历史、短对话和工作记忆，以开启新会话。"""
         self.session["history"] = []
+        self.session["conversation"] = []
         self.session["memory"].clear()
         self.session["memory"].update(memorylib.default_memory_state())
         self.memory = memorylib.LayeredMemory(self.session["memory"], workspace_root=self.root)

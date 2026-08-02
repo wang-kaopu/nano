@@ -23,6 +23,8 @@
   - OpenAI 兼容 Responses API
   - Anthropic 兼容 Messages API
   - DeepSeek Anthropic 兼容 API
+- 模型响应使用异步流式处理；完整工具调用一经接收即开始执行，不等待整段响应结束
+- 模型上下文保留最新消息；达到 6 条后只保留最近 3 条，完整运行过程仍写入 run trace
 
 ## 使用截图
 

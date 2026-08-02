@@ -1,5 +1,6 @@
 """Structured tool execution for the agent runtime."""
 
+import asyncio
 import re
 from typing import Any
 
@@ -182,3 +183,7 @@ class ToolExecutor:
             )
             agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
+
+    async def execute_async(self, name, args):
+        """在不阻塞事件循环的前提下执行同步安全闸口。"""
+        return await asyncio.to_thread(self.execute, name, args)

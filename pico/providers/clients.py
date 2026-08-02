@@ -10,6 +10,7 @@ import time
 
 import httpx
 
+from ..query_events import ModelStreamEvent
 from ..schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
 
 OPENAI_COMPATIBLE_USER_AGENT = "pico/0.1"
@@ -64,12 +65,21 @@ class FakeModelClient:
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, **kwargs):
+        """为同步调用方返回下一条预设的完整响应。"""
         self.prompts.append(prompt)
         if not getattr(self, "last_completion_metadata", None):
             self.last_completion_metadata = {}
         if not self.outputs:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
+
+    async def stream(self, prompt, max_new_tokens, **kwargs):
+        """将下一条预设响应作为确定性的文本流产出。"""
+        raw = self.complete(prompt, max_new_tokens, **kwargs)
+        chunks = raw if isinstance(raw, list) else [raw]
+        for chunk in chunks:
+            yield ModelStreamEvent("text_delta", text=str(chunk))
+        yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata or {}))
 
 
 class OllamaModelClient:
@@ -83,6 +93,7 @@ class OllamaModelClient:
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, **kwargs):
+        """请求一条非流式 Ollama 完成响应。"""
         # Ollama 当前不支持我们这里接入的 prompt cache 语义，
         # 所以 runtime 传下来的缓存参数会被忽略。
         self.last_completion_metadata = {}
@@ -120,6 +131,47 @@ class OllamaModelClient:
         if data.get("error"):
             raise RuntimeError(f"Ollama error: {data['error']}")
         return data.get("response", "")
+
+    async def stream(self, prompt, max_new_tokens, **kwargs):
+        """将 Ollama generate 分块转换为标准化模型事件。"""
+        del kwargs
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": True,
+            "raw": False,
+            "think": False,
+            "options": {
+                "num_predict": max_new_tokens,
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                async with client.stream("POST", self.host + "/api/generate", json=payload, headers={"Content-Type": "application/json"}) as response:
+                    if response.status_code >= 400:
+                        yield ModelStreamEvent("error", metadata={"message": f"Ollama request failed with HTTP {response.status_code}: {await response.aread()}"})
+                        return
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        data = json.loads(line)
+                        text = data.get("response")
+                        if isinstance(text, str) and text:
+                            yield ModelStreamEvent("text_delta", text=text)
+                        if data.get("done"):
+                            metadata = {
+                                "input_tokens": data.get("prompt_eval_count"),
+                                "output_tokens": data.get("eval_count"),
+                                "finish_reason": data.get("done_reason"),
+                            }
+                            self.last_completion_metadata = metadata
+                            yield ModelStreamEvent("completed", metadata=metadata)
+                            return
+        except (httpx.RequestError, json.JSONDecodeError) as exc:
+            yield ModelStreamEvent("error", metadata={"message": f"Ollama stream failed: {exc}"})
 
 
 def _normalize_versioned_base_url(base_url):
@@ -381,6 +433,68 @@ class OpenAICompatibleModelClient:
         }
         return _extract_openai_text(data)
 
+    async def stream(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+        """将 OpenAI Responses SSE 事件转换为文本增量和完成元数据。"""
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+            "max_output_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        if self.supports_prompt_cache and prompt_cache_key:
+            payload["prompt_cache_key"] = prompt_cache_key
+        if self.supports_prompt_cache and prompt_cache_retention:
+            payload["prompt_cache_retention"] = prompt_cache_retention
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": OPENAI_COMPATIBLE_USER_AGENT}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        saw_delta = False
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                async with client.stream("POST", self.base_url + "/responses", json=payload, headers=headers) as response:
+                    if response.status_code >= 400:
+                        yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
+                        return
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        body = line[len("data:"):].strip()
+                        if not body or body == "[DONE]":
+                            continue
+                        event = json.loads(body)
+                        event_type = event.get("type", "")
+                        if event_type == "response.output_text.delta":
+                            text = event.get("delta")
+                            if isinstance(text, str) and text:
+                                saw_delta = True
+                                yield ModelStreamEvent("text_delta", text=text)
+                        elif event_type == "response.completed":
+                            response_data = event.get("response") or {}
+                            if not saw_delta:
+                                text = _extract_openai_text(response_data)
+                                if text:
+                                    yield ModelStreamEvent("text_delta", text=text)
+                            metadata = {
+                                "prompt_cache_supported": self.supports_prompt_cache,
+                                "prompt_cache_key": prompt_cache_key,
+                                "prompt_cache_retention": prompt_cache_retention,
+                                **_extract_usage_cache_details(response_data),
+                            }
+                            self.last_completion_metadata = metadata
+                            yield ModelStreamEvent("completed", metadata=metadata)
+                            return
+                        elif event_type in {"error", "response.failed"}:
+                            error = event.get("error") or event.get("response", {}).get("error") or event
+                            yield ModelStreamEvent("error", metadata={"message": str(error)})
+                            return
+        except (httpx.RequestError, json.JSONDecodeError) as exc:
+            yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible stream failed: {exc}"})
+
 
 def _extract_anthropic_text(data):
     for item in data.get("content", []):
@@ -402,6 +516,7 @@ class AnthropicCompatibleModelClient:
         self.last_completion_metadata = {}
 
     def complete(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+        """请求一条非流式 Anthropic 兼容完成响应。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
         # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
         del prompt_cache_key, prompt_cache_retention
@@ -462,3 +577,52 @@ class AnthropicCompatibleModelClient:
         if text:
             return text
         raise RuntimeError("Anthropic-compatible error: could not extract text from response")
+
+    async def stream(self, prompt, max_new_tokens, prompt_cache_key=None, prompt_cache_retention=None):
+        """将 Anthropic Messages SSE 事件转换为标准化文本增量。"""
+        del prompt_cache_key, prompt_cache_retention
+        self.last_completion_metadata = {}
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "max_tokens": max_new_tokens,
+            "stream": True,
+        }
+        if self.temperature is not None:
+            payload["temperature"] = self.temperature
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                async with client.stream("POST", self.base_url + "/messages", json=payload, headers=headers) as response:
+                    if response.status_code >= 400:
+                        yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
+                        return
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line.startswith("data:"):
+                            continue
+                        body = line[len("data:"):].strip()
+                        if not body:
+                            continue
+                        event = json.loads(body)
+                        event_type = event.get("type", "")
+                        if event_type == "content_block_delta":
+                            text = event.get("delta", {}).get("text")
+                            if isinstance(text, str) and text:
+                                yield ModelStreamEvent("text_delta", text=text)
+                        elif event_type == "message_delta":
+                            usage = event.get("usage") or {}
+                            self.last_completion_metadata.update(
+                                {
+                                    "output_tokens": usage.get("output_tokens"),
+                                    "finish_reason": event.get("delta", {}).get("stop_reason"),
+                                }
+                            )
+                        elif event_type == "message_stop":
+                            yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata))
+                            return
+                        elif event_type == "error":
+                            yield ModelStreamEvent("error", metadata={"message": str(event.get("error") or event)})
+                            return
+        except (httpx.RequestError, json.JSONDecodeError) as exc:
+            yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible stream failed: {exc}"})

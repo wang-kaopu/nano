@@ -1645,19 +1645,17 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
     assert agent.last_prompt_metadata["prompt_cache_key"] == agent.last_prompt_metadata["prefix_hash"]
 
 
-def test_recent_transcript_entries_stay_richer_than_older_ones(tmp_path):
+def test_streaming_conversation_retains_recent_messages_only(tmp_path):
     agent = build_agent(tmp_path, ["<final>Done.</final>"])
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
 
-    agent.record({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
-    agent.record({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
-    agent.record({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:06:00+00:00"})
-    agent.record({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:07:00+00:00"})
+    agent.record_conversation({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
+    agent.record_conversation({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
+    agent.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
+    agent.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
+    agent.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
+    agent.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
 
     assert agent.ask("Check the transcript") == "Done."
 
