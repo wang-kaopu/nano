@@ -58,6 +58,20 @@ def test_safe_shell_command_does_not_require_approval(tmp_path):
     assert "exit_code: 0" in result
 
 
+def test_project_allowed_write_file_does_not_require_approval(tmp_path):
+    """项目显式放行写文件后，--approval never 不应阻断该操作。"""
+    (tmp_path / "permissions.json").write_text(
+        '{"permissions":{"allow":["write_file"],"deny":[]}}',
+        encoding="utf-8",
+    )
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("write_file", {"path": "created.txt", "content": "created\n"})
+
+    assert result == "wrote created.txt (8 chars)"
+    assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created\n"
+
+
 def test_dangerous_shell_command_requires_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
 
@@ -112,6 +126,13 @@ def test_double_ctrl_c_handler_requires_two_presses(capsys):
 
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
     class DummyModelClient:
+        model = "dummy"
+        base_url = ""
+        supports_prompt_cache = False
+        supports_native_tool_calls = False
+        native_tool_call_protocol = "openai"
+        last_completion_metadata = {}
+
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs
@@ -155,6 +176,13 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
 
 def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_path):
     class DummyModelClient:
+        model = "dummy"
+        base_url = ""
+        supports_prompt_cache = False
+        supports_native_tool_calls = False
+        native_tool_call_protocol = "openai"
+        last_completion_metadata = {}
+
         def __init__(self, *args, **kwargs):
             self.args = args
             self.kwargs = kwargs

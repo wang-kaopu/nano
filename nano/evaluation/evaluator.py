@@ -98,12 +98,13 @@ SCRIPTED_MODEL_OUTPUTS = {
         "<final>Done.</final>",
     ],
     "context_reduction_checkpoint": [
+        "Compacted conversation summary.",
         "<final>Done.</final>",
     ],
     "freshness_reanchor_resume": [
         "<final>Done.</final>",
     ],
-    "workspace_mismatch_resume": [
+    "workspace_fingerprint_ignored": [
         "<final>Done.</final>",
     ],
 }
@@ -310,30 +311,18 @@ def _apply_task_setup(agent, task, fixture_copy_root):
 
     kind = str(setup.get("kind", "")).strip()
     if kind == "context_reduction":
-        history_count = int(setup.get("history_count", 12))
-        note_count = int(setup.get("note_count", 6))
-        for index in range(history_count):
-            agent.record(
+        conversation_count = int(setup.get("conversation_count", 4))
+        conversation = agent.session.setdefault("conversation", [])
+        for index in range(conversation_count):
+            conversation.append(
                 {
                     "role": "user" if index % 2 == 0 else "assistant",
-                    "content": f"benchmark-history-{index}-" + ("A" * 220),
+                    "content": f"benchmark-conversation-{index}-" + ("A" * 220),
                     "created_at": f"2026-04-15T09:{index:02d}:00+00:00",
                 }
             )
-        for index in range(note_count):
-            agent.memory.append_note(
-                f"benchmark-note-{index}-" + ("B" * 180),
-                tags=("recall",),
-                created_at=f"2026-04-15T10:{index:02d}:00+00:00",
-            )
-        agent.session["memory"] = agent.memory.to_dict()
-        agent.context_manager.total_budget = int(setup.get("total_budget", 900))
-        agent.context_manager.section_budgets = dict(
-            setup.get(
-                "section_budgets",
-                {"prefix": 120, "memory": 120, "relevant_memory": 120, "history": 160},
-            )
-        )
+        agent.last_input_token_count = agent.effective_window
+        agent.session["last_input_token_count"] = agent.last_input_token_count
         return
 
     if kind == "freshness_mismatch":
@@ -361,7 +350,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
         (fixture_copy_root / path).write_text(str(setup.get("mutated_text", "alpha\nbeta\nstale-updated\nplaceholder\n")), encoding="utf-8")
         return
 
-    if kind == "workspace_mismatch":
+    if kind == "workspace_fingerprint_ignored":
         agent.session["checkpoints"] = {
             "current_id": "ckpt_workspace",
             "items": {

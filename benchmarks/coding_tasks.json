@@ -74,24 +74,16 @@
     },
     {
       "id": "context_reduction_checkpoint",
-      "prompt": "Finish the README update after prompt compression creates a checkpoint.",
+      "prompt": "Finish after automatic conversation compaction.",
       "fixture_repo": "tests/fixtures/bench_repo_readme",
       "allowed_tools": ["read_file"],
       "step_budget": 2,
-      "expected_artifact": "README.md remains available while context reduction creates a checkpoint",
-      "verifier": "python3 -c \"import json; from pathlib import Path; report = json.loads(next(Path('.nano/runs').glob('*/report.json')).read_text(encoding='utf-8')); trace = [json.loads(line) for line in next(Path('.nano/runs').glob('*/trace.jsonl')).read_text(encoding='utf-8').splitlines()]; assert report['checkpoint_id']; assert any(event.get('event') == 'checkpoint_created' and event.get('trigger') == 'context_reduction' for event in trace)\"",
+      "expected_artifact": "README.md remains available while automatic conversation compaction persists its summary",
+      "verifier": "python3 -c \"import json; from pathlib import Path; session = json.loads(next(Path('.nano/sessions').glob('*.json')).read_text(encoding='utf-8')); assert session['conversation'][0]['content'].startswith('[Previous conversation summary]')\"",
       "category": "recovery",
       "setup": {
         "kind": "context_reduction",
-        "history_count": 12,
-        "note_count": 6,
-        "total_budget": 700,
-        "section_budgets": {
-          "prefix": 800,
-          "memory": 800,
-          "relevant_memory": 800,
-          "history": 2400
-        }
+        "conversation_count": 4
       }
     },
     {
@@ -111,16 +103,16 @@
       }
     },
     {
-      "id": "workspace_mismatch_resume",
-      "prompt": "Resume after benchmark workspace drift and rebuild runtime state.",
+      "id": "workspace_fingerprint_ignored",
+      "prompt": "Resume without treating a workspace fingerprint as a runtime mismatch.",
       "fixture_repo": "tests/fixtures/bench_repo_readme",
       "allowed_tools": ["read_file"],
       "step_budget": 3,
-      "expected_artifact": "README.md exists after workspace mismatch recovery",
-      "verifier": "python3 -c \"import json; from pathlib import Path; report = json.loads(next(Path('.nano/runs').glob('*/report.json')).read_text(encoding='utf-8')); trace = [json.loads(line) for line in next(Path('.nano/runs').glob('*/trace.jsonl')).read_text(encoding='utf-8').splitlines()]; assert report['prompt_metadata']['resume_status'] == 'workspace-mismatch'; assert any(event.get('event') == 'runtime_identity_mismatch' for event in trace)\"",
+      "expected_artifact": "README.md exists after a workspace fingerprint is ignored",
+      "verifier": "python3 -c \"import json; from pathlib import Path; report = json.loads(next(Path('.nano/runs').glob('*/report.json')).read_text(encoding='utf-8')); trace = [json.loads(line) for line in next(Path('.nano/runs').glob('*/trace.jsonl')).read_text(encoding='utf-8').splitlines()]; assert report['prompt_metadata']['resume_status'] == 'full-valid'; assert not any(event.get('event') == 'runtime_identity_mismatch' for event in trace)\"",
       "category": "recovery",
       "setup": {
-        "kind": "workspace_mismatch"
+        "kind": "workspace_fingerprint_ignored"
       }
     }
   ]

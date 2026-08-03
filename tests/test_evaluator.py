@@ -4,6 +4,7 @@ from collections import Counter
 
 import pytest
 
+from nano.evaluation import evaluator as evaluator_module
 from nano.evaluation.evaluator import (
     BenchmarkEvaluator,
     load_benchmark,
@@ -104,7 +105,7 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         "max_new_tokens": 64,
     }
     assert reproducibility["timezone"] == "Asia/Shanghai"
-    assert reproducibility["locale"] == "C.UTF-8"
+    assert reproducibility["locale"] == evaluator_module._current_locale()
 
     for row in artifact["rows"]:
         assert not row["fixture_copy_relpath"].startswith("/")
@@ -129,13 +130,10 @@ def test_run_fixed_benchmark_covers_recovery_rows(tmp_path):
 
     context_row = next(item for item in artifact["rows"] if item["id"] == "context_reduction_checkpoint")
 
-    trace_path = (tmp_path / "workspaces" / context_row["run_dir_relpath"] / "trace.jsonl").resolve()
-    trace_events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+    session_path = next((tmp_path / "workspaces" / context_row["fixture_copy_relpath"] / ".nano" / "sessions").glob("*.json"))
+    session = json.loads(session_path.read_text(encoding="utf-8"))
 
-    assert any(
-        event.get("event") == "checkpoint_created" and event.get("trigger") == "context_reduction"
-        for event in trace_events
-    )
+    assert session["conversation"][0]["content"].startswith("[Previous conversation summary]")
 
 
 def test_run_harness_regression_v2_writes_named_artifact(tmp_path):

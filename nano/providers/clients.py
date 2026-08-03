@@ -358,7 +358,7 @@ class OpenAICompatibleModelClient:
         if status_code >= 400:
             raise RuntimeError(f"OpenAI-compatible request failed with HTTP {status_code}: {_response_text(response)}")
         body_text = _response_text(response)
-        response_headers = response.headers if isinstance(response, httpx.Response) else {}
+        response_headers = getattr(response, "headers", {})
         content_type = response_headers.get("Content-Type", response_headers.get("content-type", ""))
 
         # 有些兼容后端返回普通 JSON，有些返回 SSE。

@@ -152,6 +152,9 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
 
     def requires_approval(self, input_value: ToolArguments, context: ToolContext | None = None) -> bool:
         """返回当前输入是否需要按运行时审批策略人工确认。"""
+        command = input_value.command if isinstance(input_value, RunShellArguments) else None
+        if context is not None and context.permissions.decision(self.name, command) == "allow":
+            return False
         if self.approval_required is not None:
             return self.approval_required(input_value, context)
         return super().requires_approval(input_value, context)

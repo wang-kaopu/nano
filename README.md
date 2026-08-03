@@ -280,7 +280,7 @@ NANO_ANTHROPIC_MODEL="claude-sonnet-4-6"
 }
 ```
 
-`permissions.json` 默认只放行本地检查及常见构建、测试命令，例如 `rg`、`git status`、`git diff`、`pytest`、`ruff`、`pyright`、`uv run pytest`、`npm test` 与 `npm run build`；默认 `deny` 为空，未被 allow 的命令继续走审批。项目需要硬禁止某类命令时，可自行在 `deny` 中添加规则。用户拒绝审批时，本次运行会立即停止，不能改用替代命令绕过该决定。
+`permissions.json` 默认只放行只读工具、`write_file` 及本地检查和常见构建、测试命令，例如 `rg`、`git status`、`git diff`、`pytest`、`ruff`、`pyright`、`uv run pytest`、`npm test` 与 `npm run build`；默认 `deny` 为空，未被 allow 的命令继续走审批。项目需要硬禁止某类命令时，可自行在 `deny` 中添加规则。用户拒绝审批时，本次运行会立即停止，不能改用替代命令绕过该决定。
 
 每次运行结束后，都会在 `.nano/runs/<run_id>/` 下写出这些文件：
 

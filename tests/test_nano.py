@@ -41,6 +41,17 @@ def build_agent(tmp_path, outputs, **kwargs):
     )
 
 
+def configure_mock_model_client(client):
+    """补齐构造 Nano 所需的模型客户端协议字段。"""
+    client.model = "mock-model"
+    client.base_url = ""
+    client.supports_prompt_cache = False
+    client.supports_native_tool_calls = False
+    client.native_tool_call_protocol = "openai"
+    client.last_completion_metadata = {}
+    return client
+
+
 async def _collect_events(stream):
     """收集异步模型流事件，便于断言 provider 协议。"""
     return [event async for event in stream]
@@ -894,6 +905,7 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
             "provider": "openai",
             "model": "override-model",
             "base_url": None,
+            "openai_timeout": 300,
             "temperature": 0.2,
             "resume": None,
             "approval": "ask",
@@ -913,7 +925,7 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
         clear=False,
     ):
         with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
-            fake_client = mock_openai.return_value
+            fake_client = configure_mock_model_client(mock_openai.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
@@ -944,7 +956,7 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
 
     with patch.dict(os.environ, {"NANO_RIGHT_CODES_API_KEY": "sk-right-codes"}, clear=True):
         with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
-            fake_client = mock_openai.return_value
+            fake_client = configure_mock_model_client(mock_openai.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
@@ -1000,7 +1012,7 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
+            fake_client = configure_mock_model_client(mock_anthropic.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
@@ -1020,6 +1032,7 @@ def test_build_agent_uses_anthropic_default_model_when_env_is_missing(tmp_path):
     ):
         os.environ.pop("ANTHROPIC_MODEL", None)
         with patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            configure_mock_model_client(mock_anthropic.return_value)
             nano_pkg.build_agent(args)
 
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-6"
@@ -1070,7 +1083,7 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
+            fake_client = configure_mock_model_client(mock_anthropic.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
@@ -1085,6 +1098,7 @@ def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
 
     with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-deepseek"}, clear=True):
         with patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            configure_mock_model_client(mock_anthropic.return_value)
             nano_pkg.build_agent(args)
 
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
@@ -1106,7 +1120,7 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
+            fake_client = configure_mock_model_client(mock_anthropic.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
@@ -1134,7 +1148,7 @@ def test_build_agent_uses_project_env_deepseek_key_by_default(tmp_path):
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
-            fake_client = mock_anthropic.return_value
+            fake_client = configure_mock_model_client(mock_anthropic.return_value)
             agent = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
@@ -1373,7 +1387,7 @@ def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(
     assert agent._last_tool_result_metadata["workspace_changed"] is True
 
 
-def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_stale(tmp_path):
+def test_resume_ignores_workspace_fingerprint_when_checkpoint_runtime_identity_is_stale(tmp_path):
     agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
     agent.session["checkpoints"] = {
         "current_id": "ckpt_workspace",
@@ -1406,7 +1420,7 @@ def test_resume_marks_workspace_mismatch_when_checkpoint_runtime_identity_is_sta
     )
 
     assert resumed.ask("Continue the task") == "Resumed."
-    assert resumed.last_prompt_metadata["resume_status"] == "workspace-mismatch"
+    assert resumed.last_prompt_metadata["resume_status"] == "full-valid"
 
 
 def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
@@ -1698,7 +1712,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
     assert agent.last_prompt_metadata["cached_tokens"] == 512
     assert agent.last_prompt_metadata["cache_hit"] is True
     assert agent.last_prompt_metadata["prefix_hash"]
-    assert agent.last_prompt_metadata["prompt_cache_key"] == agent.last_prompt_metadata["prefix_hash"]
+    assert agent.last_prompt_metadata["prompt_cache_key"] == f"session:{agent.session['id']}"
 
 
 def test_streaming_conversation_retains_messages_until_auto_compact(tmp_path):

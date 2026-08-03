@@ -5,6 +5,7 @@
       "list_files",
       "search",
       "grep_search",
+      "write_file",
       "run_shell(npm test*)",
       "run_shell(npm run check*)",
       "run_shell(npm run build*)",
