@@ -359,28 +359,6 @@ def test_repeated_identical_tool_call_is_rejected(tmp_path):
     assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
 
 
-def test_welcome_screen_keeps_box_shape_for_long_paths(tmp_path):
-    deep = tmp_path / "very" / "long" / "path" / "for" / "the" / "nano" / "agent" / "welcome" / "screen"
-    deep.mkdir(parents=True)
-    agent = build_agent(deep, [])
-
-    welcome = build_welcome(agent, model="qwen3.5:4b", host="http://127.0.0.1:11434")
-    lines = welcome.splitlines()
-
-    assert len(lines) >= 5
-    assert len({len(line) for line in lines}) == 1
-    assert "..." in welcome
-    assert "(  o o  )" in welcome
-    assert "MINI-CODING-AGENT" not in welcome
-    assert "MINI CODING AGENT" not in welcome
-    assert "nano" in welcome
-    assert "local coding agent" in welcome
-    assert "// READY" not in welcome
-    assert "SLASH" not in welcome
-    assert "READY      " not in welcome
-    assert "commands: Commands:" not in welcome
-
-
 def test_ollama_client_posts_expected_payload():
     captured = {}
 

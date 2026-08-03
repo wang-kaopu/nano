@@ -13,6 +13,15 @@ import sys
 import textwrap
 import time
 
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.filters import has_completions
+from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.application import Application
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit
+from prompt_toolkit.shortcuts import CompleteStyle, PromptSession
+from prompt_toolkit.widgets import Dialog, Label, RadioList
+
 from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
 from nano.runtime.runtime import Nano
@@ -35,21 +44,19 @@ DEFAULT_SECRET_ENV_NAMES = (
     "GH_PAT",
 )
 
-WELCOME_ART = (
-    "        /\\___/\\\\",
-    "       (  o o  )",
-    "       /   ^   \\\\",
-    "      /|       |\\\\",
-)
+WELCOME_ART = ("")
 WELCOME_NAME = "nano"
 WELCOME_SUBTITLE = "local coding agent"
 WELCOME_STATUS = "calm shell, ready for work"
+SLASH_COMMANDS = ("/help", "/memory", "/session", "/resume", "/reset", "/exit", "/quit")
+SLASH_COMMAND_COMPLETER = WordCompleter(SLASH_COMMANDS, sentence=True)
 HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
     /memory  Show the agent's distilled working memory.
     /session Show the path to the saved session file.
+    /resume  Select and resume a saved session.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
 
@@ -91,6 +98,26 @@ class _DoubleCtrlCInterruptHandler:
             return
         self.first_interrupt_at = interrupt_at
         print("\nPress Ctrl-C again within 2 seconds to interrupt the current request.", flush=True)
+
+
+SLASH_COMMAND_KEY_BINDINGS = KeyBindings()
+SESSION_SELECTOR_KEY_BINDINGS = KeyBindings()
+
+
+@SLASH_COMMAND_KEY_BINDINGS.add("enter", filter=has_completions)
+def _accept_slash_command_completion(event) -> None:
+    """将当前候选命令写入输入缓冲区，并立即提交该命令。"""
+    completion_state = event.current_buffer.complete_state
+    if completion_state is not None:
+        completion = completion_state.current_completion or completion_state.completions[0]
+        event.current_buffer.apply_completion(completion)
+    event.current_buffer.validate_and_handle()
+
+
+@SESSION_SELECTOR_KEY_BINDINGS.add("escape", eager=True)
+def _cancel_session_selector(event) -> None:
+    """取消会话选择弹窗并回到主 REPL 输入框。"""
+    event.app.exit(result=None)
 
 
 def _effective_model(args, provider):
@@ -338,11 +365,17 @@ def main(argv=None):
                 return 1
         return 0
 
+    prompt_session = PromptSession(
+        completer=SLASH_COMMAND_COMPLETER,
+        complete_while_typing=True,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        key_bindings=SLASH_COMMAND_KEY_BINDINGS,
+    )
     while True:
         # 交互模式：每次读取一条用户输入，交给同一个 agent，
         # 因此 session history 和 working memory 会跨轮延续。
         try:
-            user_input = input("\nnano> ").strip()
+            user_input = prompt_session.prompt("\nnano> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("")
             return 0
@@ -359,6 +392,55 @@ def main(argv=None):
             continue
         if user_input == "/session":
             print(agent.session_path)
+            continue
+        if user_input == "/resume":
+            sessions = agent.session_store.list_summaries()
+            if not sessions:
+                print("No saved sessions.")
+                continue
+            session_selector = RadioList(
+                values=[(item["id"], f"{item['title']}\n  Updated: {item['updated_at']}") for item in sessions],
+                select_on_focus=True,
+            )
+            session_confirm_key_bindings = KeyBindings()
+
+            @session_confirm_key_bindings.add("enter", eager=True)
+            def _confirm_session_selector(event) -> None:
+                """确认当前带有星号标记的会话并退出选择界面。"""
+                event.app.exit(result=session_selector.current_value)
+
+            session_dialog = Dialog(
+                title="Resume session",
+                body=HSplit([Label("Use ↑/↓ to select, Enter to confirm, or Esc to cancel."), session_selector], padding=1),
+                with_background=True,
+            )
+            session_app = Application(
+                layout=Layout(session_dialog, focused_element=session_selector.control),
+                key_bindings=merge_key_bindings([SESSION_SELECTOR_KEY_BINDINGS, session_confirm_key_bindings]),
+                full_screen=True,
+                mouse_support=True,
+            )
+            session_id = session_app.run()
+            if not session_id:
+                continue
+            agent = Nano.from_session(
+                model_client=agent.model_client,
+                workspace=agent.workspace,
+                session_store=agent.session_store,
+                session_id=session_id,
+                run_store=agent.run_store,
+                approval_policy=agent.approval_policy,
+                max_steps=agent.max_steps,
+                max_new_tokens=agent.max_new_tokens,
+                depth=agent.depth,
+                max_depth=agent.max_depth,
+                read_only=agent.read_only,
+                shell_env_allowlist=agent.shell_env_allowlist,
+                secret_env_names=agent.secret_env_names,
+                feature_flags=agent.feature_flags,
+                allowed_tools=agent.allowed_tools,
+            )
+            print(f"Resumed session {session_id}.")
             continue
         if user_input == "/reset":
             agent.reset()

@@ -1,6 +1,7 @@
 """Session JSON persistence."""
 
 from collections.abc import Iterable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -37,3 +38,22 @@ class SessionStore:
         """返回最近写入的会话 ID；没有会话时返回 None。"""
         files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)
         return files[-1].stem if files else None
+
+    def list_summaries(self) -> list[dict[str, str]]:
+        """返回按更新时间倒序排列、可供交互式恢复选择的会话摘要。"""
+        summaries = []
+        for path in sorted(self.root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True):
+            session = self.load(path.stem)
+            latest_message = next(
+                (
+                    " ".join(str(item.get("content", "")).split())
+                    for item in reversed(session["history"])
+                    if item.get("role") == "user" and str(item.get("content", "")).strip()
+                ),
+                "Untitled session",
+            )
+            if len(latest_message) > 80:
+                latest_message = latest_message[:79] + "…"
+            updated_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone().strftime("%Y-%m-%d %H:%M")
+            summaries.append({"id": path.stem, "title": latest_message, "updated_at": updated_at})
+        return summaries

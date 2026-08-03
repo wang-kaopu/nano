@@ -233,9 +233,12 @@ uv run nano --provider ollama --model qwen3.5:4b
 
 ## 常用交互命令
 
+在 `nano>` 输入 `/` 会显示命令菜单；使用上下方向键选择，按回车确认。
+
 - `/help`：查看内置命令
 - `/memory`：查看提炼后的工作记忆
 - `/session`：查看当前会话文件路径
+- `/resume`：弹出已保存会话列表，显示最新消息和更新时间；上下键选择，回车恢复，`Esc` 退出
 - `/reset`：清空当前会话状态
 - `/exit` 或 `/quit`：退出 REPL
 

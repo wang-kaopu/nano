@@ -1,4 +1,5 @@
 import json
+import os
 
 from nano.storage.session_store import SessionStore
 
@@ -25,3 +26,25 @@ def test_session_store_latest_is_none_when_empty(tmp_path):
     store = SessionStore(tmp_path / ".nano" / "sessions")
 
     assert store.latest() is None
+
+
+def test_session_store_lists_summaries_by_update_time_with_latest_message(tmp_path):
+    store = SessionStore(tmp_path / ".nano" / "sessions")
+    older_path = store.save({"id": "session_older", "history": [{"role": "user", "content": "Older message"}]})
+    newer_path = store.save(
+        {
+            "id": "session_newer",
+            "history": [
+                {"role": "user", "content": "Initial question"},
+                {"role": "assistant", "content": "Latest reply"},
+            ],
+        }
+    )
+    os.utime(older_path, (100, 100))
+    os.utime(newer_path, (200, 200))
+
+    summaries = store.list_summaries()
+
+    assert [item["id"] for item in summaries] == ["session_newer", "session_older"]
+    assert summaries[0]["title"] == "Initial question"
+    assert summaries[0]["updated_at"]
