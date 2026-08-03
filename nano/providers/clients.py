@@ -5,7 +5,10 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 这些差异都在这里被抹平成统一的 complete() 接口。
 """
 
+import asyncio
 import json
+import random
+import sys
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any
@@ -17,6 +20,65 @@ from nano.storage.schemas import AnthropicResponseModel, OllamaResponseModel, Op
 from nano.types import JsonObject
 
 OPENAI_COMPATIBLE_USER_AGENT = "nano/0.1"
+MAX_RETRIES = 3
+
+
+class _ProviderHTTPError(RuntimeError):
+    """携带 HTTP 状态码的 provider 响应错误，供重试策略分类。"""
+
+    def __init__(self, status: int) -> None:
+        """记录需要按状态码处理的 HTTP 失败。"""
+        self.status = status
+        self.status_code = status
+        super().__init__(f"HTTP {status}")
+
+
+def is_retryable(error: Any) -> bool:
+    """判断错误是否属于限流、临时不可用或可恢复网络故障。"""
+    status = getattr(error, "status", None) or getattr(error, "status_code", None)
+    if status in {429, 503, 529}:
+        return True
+    code = getattr(error, "code", None)
+    if code in {"ECONNRESET", "ETIMEDOUT"}:
+        return True
+    if isinstance(error, httpx.TimeoutException):
+        return True
+    message = str(getattr(error, "message", error)).lower()
+    return "overloaded" in message
+
+
+def _retry_delay(attempt: int) -> float:
+    """计算带抖动的指数退避时间，避免并发客户端同步重试。"""
+    return min(1000 * (2**attempt), 30000) / 1000 + random.random()
+
+
+def _retry_reason(error: Any) -> str:
+    """将可重试错误转换为终端可读的简短原因。"""
+    status = getattr(error, "status", None) or getattr(error, "status_code", None)
+    if status:
+        return f"HTTP {status}"
+    return str(getattr(error, "code", None) or "network error")
+
+
+def _print_retry(attempt: int, max_retries: int, reason: str) -> None:
+    """向终端报告即将进行的 provider 请求重试。"""
+    print(f"Retrying provider request ({attempt}/{max_retries}) after {reason}.", file=sys.stderr, flush=True)
+
+
+def _should_retry(error: Any, attempt: int, max_retries: int) -> bool:
+    """在尚有预算且错误可恢复时记录原因并允许下一次请求。"""
+    if attempt >= max_retries or not is_retryable(error):
+        return False
+    _print_retry(attempt + 1, max_retries, _retry_reason(error))
+    return True
+
+
+async def _wait_to_retry(error: Any, attempt: int, max_retries: int) -> bool:
+    """在异步请求可重试时等待退避时间，并告知调用方是否继续。"""
+    if not _should_retry(error, attempt, max_retries):
+        return False
+    await asyncio.sleep(_retry_delay(attempt))
+    return True
 
 
 def _validate_json_response(body_text: str, model: type[Any]) -> JsonObject:
@@ -45,22 +107,23 @@ def _request_with_retries(
     payload: JsonObject,
     headers: Mapping[str, str],
     timeout: float,
-    attempts: int = 1,
+    max_retries: int = MAX_RETRIES,
 ) -> httpx.Response:
-    """发送 JSON POST 请求，并对网络错误和 5xx 响应执行有限重试。"""
-    last_error = None
-    for attempt in range(attempts):
+    """发送 JSON POST 请求，并对可恢复错误执行带抖动的指数退避重试。"""
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
         try:
             with httpx.Client(timeout=timeout, trust_env=False) as client:
                 response = client.post(url, json=payload, headers=headers)
         except httpx.RequestError as exc:
             last_error = exc
-            if attempt < attempts - 1:
-                time.sleep(0.5 * (attempt + 1))
+            if _should_retry(exc, attempt, max_retries):
+                time.sleep(_retry_delay(attempt))
                 continue
             raise
-        if _response_status_code(response) >= 500 and attempt < attempts - 1:
-            time.sleep(0.5 * (attempt + 1))
+        error = _ProviderHTTPError(_response_status_code(response))
+        if _should_retry(error, attempt, max_retries):
+            time.sleep(_retry_delay(attempt))
             continue
         return response
     raise last_error or RuntimeError("HTTP request failed")
@@ -161,30 +224,40 @@ class OllamaModelClient:
                 "top_p": self.top_p,
             },
         }
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                async with client.stream("POST", self.host + "/api/generate", json=payload, headers={"Content-Type": "application/json"}) as response:
-                    if response.status_code >= 400:
-                        yield ModelStreamEvent("error", metadata={"message": f"Ollama request failed with HTTP {response.status_code}: {await response.aread()}"})
-                        return
-                    async for line in response.aiter_lines():
-                        if not line.strip():
-                            continue
-                        data = json.loads(line)
-                        text = data.get("response")
-                        if isinstance(text, str) and text:
-                            yield ModelStreamEvent("text_delta", text=text)
-                        if data.get("done"):
-                            metadata = {
-                                "input_tokens": data.get("prompt_eval_count"),
-                                "output_tokens": data.get("eval_count"),
-                                "finish_reason": data.get("done_reason"),
-                            }
-                            self.last_completion_metadata = metadata
-                            yield ModelStreamEvent("completed", metadata=metadata)
+        for attempt in range(MAX_RETRIES + 1):
+            emitted_output = False
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                    async with client.stream("POST", self.host + "/api/generate", json=payload, headers={"Content-Type": "application/json"}) as response:
+                        if response.status_code >= 400:
+                            error = _ProviderHTTPError(response.status_code)
+                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
+                                continue
+                            yield ModelStreamEvent("error", metadata={"message": f"Ollama request failed with HTTP {response.status_code}: {await response.aread()}"})
                             return
-        except (httpx.RequestError, json.JSONDecodeError) as exc:
-            yield ModelStreamEvent("error", metadata={"message": f"Ollama stream failed: {exc}"})
+                        async for line in response.aiter_lines():
+                            if not line.strip():
+                                continue
+                            data = json.loads(line)
+                            text = data.get("response")
+                            if isinstance(text, str) and text:
+                                emitted_output = True
+                                yield ModelStreamEvent("text_delta", text=text)
+                            if data.get("done"):
+                                metadata = {
+                                    "input_tokens": data.get("prompt_eval_count"),
+                                    "output_tokens": data.get("eval_count"),
+                                    "finish_reason": data.get("done_reason"),
+                                }
+                                self.last_completion_metadata = metadata
+                                yield ModelStreamEvent("completed", metadata=metadata)
+                                return
+                return
+            except (httpx.RequestError, json.JSONDecodeError) as exc:
+                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
+                    continue
+                yield ModelStreamEvent("error", metadata={"message": f"Ollama stream failed: {exc}"})
+                return
 
 
 def _normalize_versioned_base_url(base_url: str) -> str:
@@ -363,7 +436,6 @@ class OpenAICompatibleModelClient:
                 payload,
                 headers,
                 self.timeout,
-                attempts=3,
             )
         except httpx.RequestError as exc:
             raise RuntimeError(
@@ -442,60 +514,72 @@ class OpenAICompatibleModelClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        saw_delta = False
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                async with client.stream("POST", self.base_url + "/responses", json=payload, headers=headers) as response:
-                    if response.status_code >= 400:
-                        yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
-                        return
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line.startswith("data:"):
-                            continue
-                        body = line[len("data:"):].strip()
-                        if not body or body == "[DONE]":
-                            continue
-                        event = json.loads(body)
-                        event_type = event.get("type", "")
-                        if event_type == "response.output_text.delta":
-                            text = event.get("delta")
-                            if isinstance(text, str) and text:
-                                saw_delta = True
-                                yield ModelStreamEvent("text_delta", text=text)
-                        elif event_type == "response.completed":
-                            response_data = event.get("response") or {}
-                            if not saw_delta:
-                                text = _extract_openai_text(response_data)
-                                if text:
+        for attempt in range(MAX_RETRIES + 1):
+            emitted_output = False
+            saw_delta = False
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                    async with client.stream("POST", self.base_url + "/responses", json=payload, headers=headers) as response:
+                        if response.status_code >= 400:
+                            error = _ProviderHTTPError(response.status_code)
+                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
+                                continue
+                            yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
+                            return
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            body = line[len("data:"):].strip()
+                            if not body or body == "[DONE]":
+                                continue
+                            event = json.loads(body)
+                            event_type = event.get("type", "")
+                            if event_type == "response.output_text.delta":
+                                text = event.get("delta")
+                                if isinstance(text, str) and text:
+                                    saw_delta = True
+                                    emitted_output = True
                                     yield ModelStreamEvent("text_delta", text=text)
-                            metadata = {
-                                "prompt_cache_supported": self.supports_prompt_cache,
-                                "prompt_cache_key": prompt_cache_key,
-                                "prompt_cache_retention": prompt_cache_retention,
-                                "response_output": response_data.get("output", []),
-                                **_extract_usage_cache_details(response_data),
-                            }
-                            self.last_completion_metadata = metadata
-                            yield ModelStreamEvent("completed", metadata=metadata)
-                            return
-                        elif event_type == "response.output_item.done":
-                            item = event.get("item") or {}
-                            if item.get("type") == "function_call":
-                                yield ModelStreamEvent(
-                                    "tool_call",
-                                    metadata={
-                                        "call_id": str(item.get("call_id", "")),
-                                        "name": str(item.get("name", "")),
-                                        "arguments": str(item.get("arguments", "{}")),
-                                    },
-                                )
-                        elif event_type in {"error", "response.failed"}:
-                            error = event.get("error") or event.get("response", {}).get("error") or event
-                            yield ModelStreamEvent("error", metadata={"message": str(error)})
-                            return
-        except (httpx.RequestError, json.JSONDecodeError) as exc:
-            yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible stream failed: {exc}"})
+                            elif event_type == "response.completed":
+                                response_data = event.get("response") or {}
+                                if not saw_delta:
+                                    text = _extract_openai_text(response_data)
+                                    if text:
+                                        emitted_output = True
+                                        yield ModelStreamEvent("text_delta", text=text)
+                                metadata = {
+                                    "prompt_cache_supported": self.supports_prompt_cache,
+                                    "prompt_cache_key": prompt_cache_key,
+                                    "prompt_cache_retention": prompt_cache_retention,
+                                    "response_output": response_data.get("output", []),
+                                    **_extract_usage_cache_details(response_data),
+                                }
+                                self.last_completion_metadata = metadata
+                                yield ModelStreamEvent("completed", metadata=metadata)
+                                return
+                            elif event_type == "response.output_item.done":
+                                item = event.get("item") or {}
+                                if item.get("type") == "function_call":
+                                    emitted_output = True
+                                    yield ModelStreamEvent(
+                                        "tool_call",
+                                        metadata={
+                                            "call_id": str(item.get("call_id", "")),
+                                            "name": str(item.get("name", "")),
+                                            "arguments": str(item.get("arguments", "{}")),
+                                        },
+                                    )
+                            elif event_type in {"error", "response.failed"}:
+                                error = event.get("error") or event.get("response", {}).get("error") or event
+                                yield ModelStreamEvent("error", metadata={"message": str(error)})
+                                return
+                return
+            except (httpx.RequestError, json.JSONDecodeError) as exc:
+                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
+                    continue
+                yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible stream failed: {exc}"})
+                return
 
 
 def _extract_anthropic_text(data: JsonObject) -> str:
@@ -559,7 +643,6 @@ class AnthropicCompatibleModelClient:
                 payload,
                 headers,
                 self.timeout,
-                attempts=3,
             )
         except httpx.RequestError as exc:
             raise RuntimeError(
@@ -609,80 +692,91 @@ class AnthropicCompatibleModelClient:
             payload["tools"] = tools
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
-        content_blocks: dict[int, JsonObject] = {}
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                async with client.stream("POST", self.base_url + "/messages", json=payload, headers=headers) as response:
-                    if response.status_code >= 400:
-                        yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
-                        return
-                    async for line in response.aiter_lines():
-                        line = line.strip()
-                        if not line.startswith("data:"):
-                            continue
-                        body = line[len("data:"):].strip()
-                        if not body:
-                            continue
-                        event = json.loads(body)
-                        event_type = event.get("type", "")
-                        if event_type == "content_block_start":
-                            index = int(event.get("index", -1))
-                            block = event.get("content_block") or {}
-                            if block.get("type") == "text":
-                                content_blocks[index] = {"type": "text", "text": str(block.get("text", ""))}
-                            elif block.get("type") == "tool_use":
-                                content_blocks[index] = {
-                                    "type": "tool_use",
-                                    "id": str(block.get("id", "")),
-                                    "name": str(block.get("name", "")),
-                                    "input": block.get("input") if isinstance(block.get("input"), dict) else {},
-                                    "partial_json": "",
-                                }
-                        elif event_type == "content_block_delta":
-                            index = int(event.get("index", -1))
-                            delta = event.get("delta", {})
-                            text = delta.get("text")
-                            if isinstance(text, str) and text:
-                                block = content_blocks.get(index)
-                                if block is not None and block.get("type") == "text":
-                                    block["text"] = str(block.get("text", "")) + text
-                                yield ModelStreamEvent("text_delta", text=text)
-                            partial_json = delta.get("partial_json")
-                            if isinstance(partial_json, str) and index in content_blocks:
-                                content_blocks[index]["partial_json"] = str(content_blocks[index].get("partial_json", "")) + partial_json
-                        elif event_type == "content_block_stop":
-                            index = int(event.get("index", -1))
-                            block = content_blocks.get(index)
-                            if block is not None and block.get("type") == "tool_use":
-                                partial_json = str(block.pop("partial_json", ""))
-                                if partial_json:
-                                    try:
-                                        block["input"] = json.loads(partial_json)
-                                    except json.JSONDecodeError:
-                                        block["input"] = {}
-                                yield ModelStreamEvent(
-                                    "tool_call",
-                                    metadata={
-                                        "call_id": str(block.get("id", "")),
+        for attempt in range(MAX_RETRIES + 1):
+            content_blocks: dict[int, JsonObject] = {}
+            emitted_output = False
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
+                    async with client.stream("POST", self.base_url + "/messages", json=payload, headers=headers) as response:
+                        if response.status_code >= 400:
+                            error = _ProviderHTTPError(response.status_code)
+                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
+                                continue
+                            yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
+                            return
+                        async for line in response.aiter_lines():
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            body = line[len("data:"):].strip()
+                            if not body:
+                                continue
+                            event = json.loads(body)
+                            event_type = event.get("type", "")
+                            if event_type == "content_block_start":
+                                index = int(event.get("index", -1))
+                                block = event.get("content_block") or {}
+                                if block.get("type") == "text":
+                                    content_blocks[index] = {"type": "text", "text": str(block.get("text", ""))}
+                                elif block.get("type") == "tool_use":
+                                    content_blocks[index] = {
+                                        "type": "tool_use",
+                                        "id": str(block.get("id", "")),
                                         "name": str(block.get("name", "")),
-                                        "arguments": json.dumps(block.get("input", {})),
-                                    },
+                                        "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                                        "partial_json": "",
+                                    }
+                            elif event_type == "content_block_delta":
+                                index = int(event.get("index", -1))
+                                delta = event.get("delta", {})
+                                text = delta.get("text")
+                                if isinstance(text, str) and text:
+                                    block = content_blocks.get(index)
+                                    if block is not None and block.get("type") == "text":
+                                        block["text"] = str(block.get("text", "")) + text
+                                    emitted_output = True
+                                    yield ModelStreamEvent("text_delta", text=text)
+                                partial_json = delta.get("partial_json")
+                                if isinstance(partial_json, str) and index in content_blocks:
+                                    content_blocks[index]["partial_json"] = str(content_blocks[index].get("partial_json", "")) + partial_json
+                            elif event_type == "content_block_stop":
+                                index = int(event.get("index", -1))
+                                block = content_blocks.get(index)
+                                if block is not None and block.get("type") == "tool_use":
+                                    partial_json = str(block.pop("partial_json", ""))
+                                    if partial_json:
+                                        try:
+                                            block["input"] = json.loads(partial_json)
+                                        except json.JSONDecodeError:
+                                            block["input"] = {}
+                                    emitted_output = True
+                                    yield ModelStreamEvent(
+                                        "tool_call",
+                                        metadata={
+                                            "call_id": str(block.get("id", "")),
+                                            "name": str(block.get("name", "")),
+                                            "arguments": json.dumps(block.get("input", {})),
+                                        },
+                                    )
+                            elif event_type == "message_delta":
+                                usage = event.get("usage") or {}
+                                self.last_completion_metadata.update(
+                                    {
+                                        "output_tokens": usage.get("output_tokens"),
+                                        "finish_reason": event.get("delta", {}).get("stop_reason"),
+                                    }
                                 )
-                        elif event_type == "message_delta":
-                            usage = event.get("usage") or {}
-                            self.last_completion_metadata.update(
-                                {
-                                    "output_tokens": usage.get("output_tokens"),
-                                    "finish_reason": event.get("delta", {}).get("stop_reason"),
-                                }
-                            )
-                        elif event_type == "message_stop":
-                            ordered_blocks = [content_blocks[index] for index in sorted(content_blocks)]
-                            self.last_completion_metadata["response_output"] = [{"role": "assistant", "content": ordered_blocks}]
-                            yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata))
-                            return
-                        elif event_type == "error":
-                            yield ModelStreamEvent("error", metadata={"message": str(event.get("error") or event)})
-                            return
-        except (httpx.RequestError, json.JSONDecodeError) as exc:
-            yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible stream failed: {exc}"})
+                            elif event_type == "message_stop":
+                                ordered_blocks = [content_blocks[index] for index in sorted(content_blocks)]
+                                self.last_completion_metadata["response_output"] = [{"role": "assistant", "content": ordered_blocks}]
+                                yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata))
+                                return
+                            elif event_type == "error":
+                                yield ModelStreamEvent("error", metadata={"message": str(event.get("error") or event)})
+                                return
+                return
+            except (httpx.RequestError, json.JSONDecodeError) as exc:
+                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
+                    continue
+                yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible stream failed: {exc}"})
+                return

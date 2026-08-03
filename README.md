@@ -24,6 +24,7 @@
   - Anthropic 兼容 Messages API
   - DeepSeek Anthropic 兼容 API
 - CLI 会实时打印模型响应正文；模型响应使用异步流式处理，`list_files`、`read_file`、`search` 的完整调用会在响应结束前并行抢跑，其余工具在同一轮流结束后按顺序执行
+- provider 遇到 429、503、529、连接重置、超时或 `overloaded` 时最多重试 3 次；等待时间为 `min(1000 × 2^attempt, 30000) + random(0, 1000)` 毫秒，以指数退避和抖动避免重试风暴
 - 模型上下文保留最新消息；达到 6 条后只保留最近 3 条，完整运行过程仍写入 run trace
 
 ## 使用截图
