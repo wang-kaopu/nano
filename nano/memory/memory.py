@@ -11,8 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from nano.memory.frontmatter import format_frontmatter, parse_frontmatter
-from nano.utils import clip, now
+from nano.utils.frontmatter import format_frontmatter, parse_frontmatter
+from nano.utils.text import clip, now
 
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12

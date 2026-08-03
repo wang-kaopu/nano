@@ -29,7 +29,7 @@ from nano.tools.tool import Tool, ToolProgressData
 from nano.tools.tool_context import ToolContext
 from nano.tools.tool_executor import ToolExecutor
 from nano.types import ModelClient
-from nano.utils import clip, now
+from nano.utils.text import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
 
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")

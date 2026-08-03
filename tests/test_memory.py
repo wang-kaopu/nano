@@ -1,4 +1,4 @@
-from nano.memory.frontmatter import parse_frontmatter
+from nano.utils.frontmatter import parse_frontmatter
 from nano.memory.memory import (
     MAX_INDEX_BYTES,
     MAX_INDEX_LINES,

@@ -11,7 +11,7 @@ import shlex
 from pathlib import Path
 from typing import Sequence
 
-from nano.utils import clip
+from nano.utils.text import clip
 
 MAX_TOOL_OUTPUT = 5000
 MAX_HISTORY = 12000

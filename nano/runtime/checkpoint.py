@@ -4,7 +4,7 @@ import uuid
 
 from nano.memory import memory as memorylib
 from nano.storage.schemas import CheckpointStateModel
-from nano.utils import clip, now
+from nano.utils.text import clip, now
 
 CHECKPOINT_SCHEMA_VERSION = "phase1-v1"
 CHECKPOINT_NONE_STATUS = "no-checkpoint"

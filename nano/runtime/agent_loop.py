@@ -6,7 +6,7 @@ import time
 from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
 from nano.runtime.query_loop import QueryLoop
 from nano.runtime.task_state import TaskState
-from nano.utils import clip, now
+from nano.utils.text import clip, now
 
 
 class QueryEngine:

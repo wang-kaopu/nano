@@ -27,7 +27,7 @@ from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompati
 from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import Nano
 from nano.storage.session_store import SessionStore
-from nano.utils import middle
+from nano.utils.text import middle
 from nano.workspace.context import WorkspaceContext
 
 DEFAULT_SECRET_ENV_NAMES = (

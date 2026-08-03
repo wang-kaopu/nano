@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.tools.tools import tool_definition
-from nano.utils import clip
+from nano.utils.text import clip
 
 
 class ToolExecutionMetadata(BaseModel):

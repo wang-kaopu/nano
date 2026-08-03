@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from nano.runtime.query_events import QueryEvent
-from nano.utils import clip, now
+from nano.utils.text import clip, now
 
 
 MICROCOMPACT_IDLE_S = 5 * 60
