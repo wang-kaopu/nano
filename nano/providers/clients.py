@@ -221,56 +221,6 @@ def _extract_openai_text(data: JsonObject) -> str:
     return ""
 
 
-def _extract_openai_text_from_sse(body_text: str) -> str:
-    last_response = None
-    deltas = []
-    for line in body_text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        payload = line[len("data:"):].strip()
-        if not payload or payload == "[DONE]":
-            continue
-        try:
-            event = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        event_type = event.get("type", "")
-        if event_type == "response.output_text.delta":
-            delta = event.get("delta")
-            if isinstance(delta, str):
-                deltas.append(delta)
-            continue
-        if event_type == "response.output_text.done":
-            text = event.get("text")
-            if isinstance(text, str) and text:
-                return text
-        part = event.get("part")
-        if isinstance(part, dict):
-            text = part.get("text")
-            if isinstance(text, str) and text:
-                return text
-        item = event.get("item")
-        if isinstance(item, dict):
-            text = _extract_openai_text({"output": [item]})
-            if text:
-                return text
-        response = event.get("response")
-        if isinstance(response, dict):
-            last_response = response
-            text = _extract_openai_text(response)
-            if text:
-                return text
-        text = _extract_openai_text(event)
-        if text:
-            return text
-    if deltas:
-        return "".join(deltas)
-    if isinstance(last_response, dict):
-        return _extract_openai_text(last_response)
-    return ""
-
-
 def _extract_openai_response_from_sse(body_text: str) -> tuple[str, JsonObject]:
     last_response = None
     deltas = []
@@ -567,6 +517,8 @@ class AnthropicCompatibleModelClient:
         self.temperature = temperature
         self.timeout = timeout
         self.supports_prompt_cache = False
+        self.supports_native_tool_calls = True
+        self.native_tool_call_protocol = "anthropic"
         self.last_completion_metadata = {}
 
     def complete(
@@ -575,6 +527,8 @@ class AnthropicCompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
+        tools: list[JsonObject] | None = None,
+        input_items: list[JsonObject] | None = None,
     ) -> str:
         """请求一条非流式 Anthropic 兼容完成响应。"""
         # 为了保持统一接口，runtime 仍然会传缓存参数进来；
@@ -583,22 +537,15 @@ class AnthropicCompatibleModelClient:
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": prompt,
-                        }
-                    ],
-                }
-            ],
+            "messages": input_items or [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_new_tokens,
             "stream": False,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
 
         headers = {
             "Content-Type": "application/json",
@@ -644,19 +591,25 @@ class AnthropicCompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
+        tools: list[JsonObject] | None = None,
+        input_items: list[JsonObject] | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """将 Anthropic Messages SSE 事件转换为标准化文本增量。"""
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
-        payload = {
+        payload: JsonObject = {
             "model": self.model,
-            "messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "messages": input_items or [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_new_tokens,
             "stream": True,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
+        content_blocks: dict[int, JsonObject] = {}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
                 async with client.stream("POST", self.base_url + "/messages", json=payload, headers=headers) as response:
@@ -672,10 +625,49 @@ class AnthropicCompatibleModelClient:
                             continue
                         event = json.loads(body)
                         event_type = event.get("type", "")
-                        if event_type == "content_block_delta":
-                            text = event.get("delta", {}).get("text")
+                        if event_type == "content_block_start":
+                            index = int(event.get("index", -1))
+                            block = event.get("content_block") or {}
+                            if block.get("type") == "text":
+                                content_blocks[index] = {"type": "text", "text": str(block.get("text", ""))}
+                            elif block.get("type") == "tool_use":
+                                content_blocks[index] = {
+                                    "type": "tool_use",
+                                    "id": str(block.get("id", "")),
+                                    "name": str(block.get("name", "")),
+                                    "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                                    "partial_json": "",
+                                }
+                        elif event_type == "content_block_delta":
+                            index = int(event.get("index", -1))
+                            delta = event.get("delta", {})
+                            text = delta.get("text")
                             if isinstance(text, str) and text:
+                                block = content_blocks.get(index)
+                                if block is not None and block.get("type") == "text":
+                                    block["text"] = str(block.get("text", "")) + text
                                 yield ModelStreamEvent("text_delta", text=text)
+                            partial_json = delta.get("partial_json")
+                            if isinstance(partial_json, str) and index in content_blocks:
+                                content_blocks[index]["partial_json"] = str(content_blocks[index].get("partial_json", "")) + partial_json
+                        elif event_type == "content_block_stop":
+                            index = int(event.get("index", -1))
+                            block = content_blocks.get(index)
+                            if block is not None and block.get("type") == "tool_use":
+                                partial_json = str(block.pop("partial_json", ""))
+                                if partial_json:
+                                    try:
+                                        block["input"] = json.loads(partial_json)
+                                    except json.JSONDecodeError:
+                                        block["input"] = {}
+                                yield ModelStreamEvent(
+                                    "tool_call",
+                                    metadata={
+                                        "call_id": str(block.get("id", "")),
+                                        "name": str(block.get("name", "")),
+                                        "arguments": json.dumps(block.get("input", {})),
+                                    },
+                                )
                         elif event_type == "message_delta":
                             usage = event.get("usage") or {}
                             self.last_completion_metadata.update(
@@ -685,6 +677,8 @@ class AnthropicCompatibleModelClient:
                                 }
                             )
                         elif event_type == "message_stop":
+                            ordered_blocks = [content_blocks[index] for index in sorted(content_blocks)]
+                            self.last_completion_metadata["response_output"] = [{"role": "assistant", "content": ordered_blocks}]
                             yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata))
                             return
                         elif event_type == "error":

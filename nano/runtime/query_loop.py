@@ -23,23 +23,35 @@ class QueryLoop:
 
     async def run(self) -> AsyncIterator[QueryEvent]:
         """流式处理模型输出和工具执行，并产出查询进度。"""
+        native_tool_call_protocol = str(getattr(self.runtime.model_client, "native_tool_call_protocol", "openai"))
         native_tool_calls = bool(getattr(self.runtime.model_client, "supports_native_tool_calls", False))
-        native_tools = [
-            {
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description(None),
-                "parameters": tool.input_json_schema,
-                # 现有带默认值的 Pydantic schema 不满足 strict 模式的全字段必填约束。
-                "strict": False,
-            }
-            for tool in self.runtime.tools.values()
-        ]
+        if native_tool_call_protocol == "anthropic":
+            native_tools = [
+                {
+                    "name": tool.name,
+                    "description": tool.description(None),
+                    "input_schema": tool.input_json_schema,
+                }
+                for tool in self.runtime.tools.values()
+            ]
+        else:
+            native_tools = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description(None),
+                    "parameters": tool.input_json_schema,
+                    # 现有带默认值的 Pydantic schema 不满足 strict 模式的全字段必填约束。
+                    "strict": False,
+                }
+                for tool in self.runtime.tools.values()
+            ]
         native_input: list[dict[str, Any]] = []
         while self.task_state.tool_steps < self.runtime.max_steps and self.task_state.attempts < self.max_attempts:
             prompt, prompt_metadata = self.runtime._build_prompt_and_metadata(self.user_message)
             if native_tool_calls and not native_input:
-                native_input.append({"role": "user", "content": [{"type": "input_text", "text": prompt}]})
+                content_type = "text" if native_tool_call_protocol == "anthropic" else "input_text"
+                native_input.append({"role": "user", "content": [{"type": content_type, "text": prompt}]})
             yield QueryEvent("prompt_built", {"prompt_metadata": prompt_metadata})
 
             self.task_state.record_attempt()
@@ -146,13 +158,27 @@ class QueryLoop:
                     response_output = completion_metadata.get("response_output", [])
                     if isinstance(response_output, list):
                         native_input.extend(response_output)
-                    native_input.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": str(tool_payload.get("call_id", "")),
-                            "output": result,
-                        }
-                    )
+                    if native_tool_call_protocol == "anthropic":
+                        native_input.append(
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": str(tool_payload.get("call_id", "")),
+                                        "content": result,
+                                    }
+                                ],
+                            }
+                        )
+                    else:
+                        native_input.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": str(tool_payload.get("call_id", "")),
+                                "output": result,
+                            }
+                        )
                 yield QueryEvent(
                     "tool_completed",
                     {
@@ -168,7 +194,7 @@ class QueryLoop:
             if native_tool_calls:
                 final = raw.strip()
                 if not final:
-                    yield QueryEvent("error", {"message": "OpenAI-compatible response completed without text or a function call"})
+                    yield QueryEvent("error", {"message": "native tool-call response completed without text or a function call"})
                     return
                 self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
                 self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
