@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timedelta, timezone
 
 from nano.utils.frontmatter import parse_frontmatter
 from nano.memory.memory import (
@@ -11,6 +12,7 @@ from nano.memory.memory import (
     format_memories_for_injection,
     get_memory_dir,
     load_memory_index,
+    memory_freshness_warning,
     save_memory,
 )
 
@@ -151,3 +153,15 @@ def test_memory_prefetch_applies_gates_and_consumes_only_after_completion(tmp_pa
         assert memory.consume_memory_prefetch(prefetch) == []
 
     asyncio.run(run())
+
+
+def test_memory_freshness_warning_starts_after_one_day():
+    now = datetime.now(timezone.utc)
+    one_day_old = (now - timedelta(days=1) + timedelta(seconds=1)).timestamp() * 1000
+    two_days_old = (now - timedelta(days=2, seconds=1)).timestamp() * 1000
+
+    assert memory_freshness_warning(one_day_old) == ""
+    warning = memory_freshness_warning(two_days_old)
+    assert warning.startswith("This memory is 2 days old.")
+    assert "point-in-time observations" in warning
+    assert "Verify against current code" in warning

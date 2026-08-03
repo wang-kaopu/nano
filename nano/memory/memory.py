@@ -215,10 +215,14 @@ def memory_age(mtime_ms: float) -> str:
 
 
 def memory_freshness_warning(mtime_ms: float) -> str:
-    """为超过三十天未修改的记忆标记可能过期。"""
-    if datetime.now(timezone.utc).timestamp() - mtime_ms / 1000 > 30 * 86_400:
-        return f"Warning: this memory was last updated {memory_age(mtime_ms)} and may be stale."
-    return ""
+    """为超过一天的记忆标记为需要用当前代码核验的历史观察。"""
+    days = max(0, int((datetime.now(timezone.utc).timestamp() - mtime_ms / 1000) // 86_400))
+    if days <= 1:
+        return ""
+    return (
+        f"This memory is {days} days old. Memories are point-in-time observations, not live state - "
+        "claims about code behavior may be outdated. Verify against current code before asserting as fact."
+    )
 
 
 def _truncate_memory_content(content: str, limit: int) -> str:
