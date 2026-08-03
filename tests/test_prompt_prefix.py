@@ -1,6 +1,6 @@
-from nano.runtime.prompt_prefix import build_prompt_prefix, tool_signature
+from nano.runtime.prompt_prefix import build_dynamic_system_context, build_prompt_prefix, tool_signature
 from nano.tools.tools import build_tool_registry
-from nano.workspace.context import WorkspaceContext
+from nano.workspace.context import MAX_INCLUDE_DEPTH, WorkspaceContext
 
 
 class _Agent:
@@ -25,11 +25,47 @@ def test_build_prompt_prefix_renders_tools_and_workspace_metadata(tmp_path):
 
     prefix = build_prompt_prefix(workspace=workspace, tools=tools, built_at="2026-06-02T00:00:00+08:00")
 
-    assert "You are nano" in prefix.text
-    assert "Tools:" in prefix.text
-    assert "- read_file(" in prefix.text
-    assert "Workspace:" in prefix.text
+    assert "# 1. Identity" in prefix.text
+    assert "interactive agent" in prefix.text
+    assert "# 2. System" in prefix.text
+    assert "Git context:" in prefix.text
+    assert "# 3. Doing Tasks" in prefix.text
+    assert "Do not propose changes to code you haven't read. Read files first." in prefix.text
+    assert "Avoid over-engineering. Only make changes that were requested." in prefix.text
+    assert "Do not expand scope" in prefix.text
+    assert "Do not add defensive programming" in prefix.text
+    assert "Three similar lines of code is better than a premature abstraction." in prefix.text
+    assert "# 4. Actions" in prefix.text
+    assert "Reversibility: determine whether the action can be safely undone." in prefix.text
+    assert "# 5. Using Tools" in prefix.text
+    assert "Use read_file / edit_file / list_files / grep_search instead of shell cat," in prefix.text
+    assert "If several tool calls are independent, make them in parallel." in prefix.text
+    assert "# 6. Tone & Style" in prefix.text
+    assert "Reference code as file_path:line_number." in prefix.text
+    assert "# 7. Output Efficiency" in prefix.text
+    assert "## Available tools" not in prefix.text
     assert prefix.hash
     assert prefix.workspace_fingerprint == workspace.fingerprint()
     assert prefix.tool_signature == tool_signature(tools)
     assert prefix.built_at == "2026-06-02T00:00:00+08:00"
+
+
+def test_build_dynamic_system_context_expands_local_includes_up_to_five_layers(tmp_path):
+    instruction_paths = [tmp_path / "AGENTS.md"]
+    for depth in range(1, MAX_INCLUDE_DEPTH + 2):
+        instruction_paths.append(tmp_path / f"instructions-{depth}.md")
+    for depth, path in enumerate(instruction_paths):
+        content = f"instruction depth {depth}"
+        if depth < len(instruction_paths) - 1:
+            content += f"\n@include {instruction_paths[depth + 1].name}"
+        path.write_text(content, encoding="utf-8")
+
+    workspace = WorkspaceContext.build(tmp_path)
+    dynamic_context = build_dynamic_system_context(workspace)
+
+    assert not dynamic_context.startswith(" ")
+    assert "Git context:" in dynamic_context
+    assert "Project instructions:" in dynamic_context
+    assert f"instruction depth {MAX_INCLUDE_DEPTH}" in dynamic_context
+    assert f"instruction depth {MAX_INCLUDE_DEPTH + 1}" not in dynamic_context
+    assert f"maximum depth {MAX_INCLUDE_DEPTH} reached" in dynamic_context

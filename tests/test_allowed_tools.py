@@ -24,8 +24,8 @@ def test_allowed_tools_filter_prompt_and_reject_direct_execution(tmp_path):
 
     prompt = agent.prompt("Read the README")
 
-    assert "- read_file(" in prompt
-    assert "- run_shell(" not in prompt
+    assert set(agent.tools) == {"read_file"}
+    assert "## Available tools" not in prompt
     assert agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20}) == "error: tool 'run_shell' is not allowed in this run"
 
 
@@ -104,5 +104,4 @@ def test_benchmark_evaluator_applies_allowed_tools_to_runtime_prompt(tmp_path):
     row = evaluator.run_task(evaluator.load()["tasks"][0])
 
     assert row["status"] == "pass"
-    assert "- read_file(" in captured_clients[0].prompts[0]
-    assert "- run_shell(" not in captured_clients[0].prompts[0]
+    assert "## Available tools" not in captured_clients[0].prompts[0]

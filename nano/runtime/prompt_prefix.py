@@ -36,54 +36,68 @@ def tool_signature(tools):
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False):
-    tool_lines = []
-    for name, tool in tools.items():
-        schema = tool.input_json_schema
-        required = set(schema.get("required", []))
-        fields = []
-        for field_name, field in schema.get("properties", {}).items():
-            default = "" if field_name in required else f"={field.get('default')!r}"
-            fields.append(f"{field_name}: {field.get('type', 'value')}{default}")
-        risk = "approval required" if not tool.is_read_only(tool.input_schema.model_construct()) else "safe"
-        tool_lines.append(f"- {name}({', '.join(fields)}) [{risk}] {tool.description(None)}\n  {tool.prompt()}")
-    tool_text = "\n".join(tool_lines)
-    tool_protocol_rules = (
-        "- Use the provided function tools for workspace actions; never serialize a <tool> tag yourself.\n"
-        "- Return the final answer as normal text after tool calls complete."
-        if native_tool_calls
-        else "- Return exactly one <tool>...</tool> or one <final>...</final>.\n"
-        "- Tool calls must look like:\n"
-        "  <tool>{{\"name\":\"tool_name\",\"args\":{{...}}}}</tool>\n"
-        "- For write_file and patch_file with multi-line text, prefer XML style:\n"
-        "  <tool name=\"write_file\" path=\"file.py\"><content>...</content></tool>\n"
-        "- Final answers must look like:\n"
-        "  <final>your answer</final>"
+def build_dynamic_system_context(workspace) -> str:
+    """构建随工作区变化而刷新的 system prompt 上下文。"""
+    return "\n\n".join(
+        (
+            "You are operating in a local repository. Treat the following Git state and project instructions as authoritative context.",
+            "Paths supplied to workspace tools are relative to the repository root unless the tool says otherwise.",
+            workspace.text(),
+        )
     )
+
+
+def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False):
+    """构建包含工作规范、工具协议和工作区元数据的稳定提示词前缀。"""
+    dynamic_system_context = build_dynamic_system_context(workspace)
     # prefix 可以理解成 agent 的“工作手册”：
     # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
-    text = textwrap.dedent(
-        f"""\
-        You are nano, a small local coding agent working inside a local repository.
-
-        Rules:
-        - Use tools instead of guessing about the workspace.
-        {tool_protocol_rules}
-        - Never invent tool results.
-        - Keep answers concise and concrete.
-        - If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.
-        - Before writing tests for existing code, read the implementation first.
-        - When writing tests, match the current implementation unless the user explicitly asked you to change the code.
-        - New files should be complete and runnable, including obvious imports.
-        - Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.
-        - Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={{}}.
-
-        Tools:
-        {tool_text}
-
-        {workspace.text()}
+    identity = "# 1. Identity\nYou are nano, an interactive agent that helps with software engineering tasks using the tools available to you."
+    system = "# 2. System\n" + dynamic_system_context
+    doing_tasks = textwrap.dedent(
+        """\
+        # 3. Doing Tasks
+         - Do not propose changes to code you haven't read. Read files first.
+         - Do not create files unless necessary. Prefer editing existing files.
+         - Avoid over-engineering. Only make changes that were requested.
+        - Do not expand scope: fixing a bug does not justify refactoring surrounding code.
+        - Do not add defensive programming for impossible scenarios: avoid speculative try-catch blocks and validation.
+        - Do not abstract prematurely: "Three similar lines of code is better than a premature abstraction."
         """
     ).strip()
+    actions = textwrap.dedent(
+        """\
+        # 4. Actions
+        Prefer reversible actions. For risky or destructive ones (rm -rf, git push, dropping tables), confirm with the user before proceeding.
+        - Reversibility: determine whether the action can be safely undone.
+        - Blast radius: determine whether the action affects only this local workspace or shared people, data, infrastructure, or history.
+        - High risk combines irreversible changes with a shared blast radius, such as force-pushing, deleting cloud resources, or dropping shared tables. Confirm with the user before proceeding.
+        - Low risk is reversible and local, such as editing a local file. Proceed when it is within the requested task.
+        """
+    ).strip()
+    using_tools = textwrap.dedent(
+        """\
+        # 5. Using Tools
+        - Use read_file / edit_file / list_files / grep_search instead of shell cat,
+          sed, ls, grep. Reserve run_shell for actual shell operations.
+        - If several tool calls are independent, make them in parallel.
+        """
+    ).strip()
+    tone_and_style = textwrap.dedent(
+        """\
+        # 6. Tone & Style
+         - Keep responses short and concise. Lead with the answer.
+         - Reference code as file_path:line_number.`;
+        """
+    ).strip()
+    output_efficiency = textwrap.dedent(
+        """\
+        # 7. Output Efficiency
+        - Do not restate the request, narrate routine tool use, or add unrelated background.
+        - For completed work, report the changed files and verification in the fewest useful lines.
+        """
+    ).strip()
+    text = "\n\n".join((identity, system, doing_tasks, actions, using_tools, tone_and_style, output_efficiency))
     signature = tool_signature(tools)
     return PromptPrefix(
         text=text,

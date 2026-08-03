@@ -7,7 +7,7 @@
 import subprocess
 import hashlib
 import json
-import textwrap
+import shlex
 from pathlib import Path
 from typing import Sequence
 
@@ -15,6 +15,7 @@ from nano.utils import clip
 
 MAX_TOOL_OUTPUT = 5000
 MAX_HISTORY = 12000
+MAX_INCLUDE_DEPTH = 5
 # 这些文件最可能直接影响 agent 的行动方式。
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -41,6 +42,55 @@ class WorkspaceContext:
         self.status = status
         self.recent_commits = recent_commits
         self.project_docs = project_docs
+
+    @staticmethod
+    def _include_target(line: str) -> str | None:
+        """解析一行独立的 @include 指令并返回其路径。"""
+        try:
+            parts = shlex.split(line.strip())
+        except ValueError:
+            return None
+        if len(parts) == 2 and parts[0] == "@include":
+            return parts[1]
+        return None
+
+    @classmethod
+    def _expand_project_document(
+        cls,
+        path: Path,
+        repo_root: Path,
+        depth: int = 0,
+        ancestors: tuple[Path, ...] = (),
+    ) -> str:
+        """展开仓库内项目文档的 @include 指令，最多递归五层。"""
+        try:
+            resolved_path = path.resolve(strict=True)
+            resolved_path.relative_to(repo_root)
+        except (OSError, ValueError):
+            return f"[include skipped: path is outside the repository: {path}]"
+        if not resolved_path.is_file() or any(part in IGNORED_PATH_NAMES for part in resolved_path.relative_to(repo_root).parts):
+            return f"[include skipped: unavailable file: {path}]"
+        if resolved_path in ancestors:
+            return f"[include skipped: cycle detected: {resolved_path.relative_to(repo_root)}]"
+
+        lines = []
+        for line in resolved_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            include_path = cls._include_target(line)
+            if include_path is None:
+                lines.append(line)
+                continue
+            if depth >= MAX_INCLUDE_DEPTH:
+                lines.append(f"[include skipped: maximum depth {MAX_INCLUDE_DEPTH} reached: {include_path}]")
+                continue
+            child_path = (resolved_path.parent / include_path).resolve()
+            try:
+                child_relative_path = child_path.relative_to(repo_root)
+            except ValueError:
+                lines.append(f"[include skipped: path is outside the repository: {include_path}]")
+                continue
+            child_text = cls._expand_project_document(child_path, repo_root, depth + 1, (*ancestors, resolved_path))
+            lines.extend((f"[included from {child_relative_path}]", child_text, f"[end included {child_relative_path}]"))
+        return "\n".join(lines)
 
     @classmethod
     def build(cls, cwd: str | Path, repo_root_override: str | Path | None = None) -> "WorkspaceContext":
@@ -76,7 +126,7 @@ class WorkspaceContext:
                 key = str(path.relative_to(repo_root))
                 if key in docs:
                     continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
+                docs[key] = clip(cls._expand_project_document(path, repo_root), 1200)
 
         return cls(
             cwd=str(cwd),
@@ -91,24 +141,24 @@ class WorkspaceContext:
         )
 
     def text(self) -> str:
-        # 这段文本会被塞进 prompt prefix，作为相对稳定的基线上下文。
+        """渲染动态 system context 所需的 Git 状态和项目指令。"""
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
         docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
-        return textwrap.dedent(
-            f"""\
-            Workspace:
-            - cwd: {self.cwd}
-            - repo_root: {self.repo_root}
-            - branch: {self.branch}
-            - default_branch: {self.default_branch}
-            - status:
-            {self.status}
-            - recent_commits:
-            {commits}
-            - project_docs:
-            {docs}
-            """
-        ).strip()
+        return "\n".join(
+            (
+                "Git context:",
+                f"- repository root: {self.repo_root}",
+                f"- working directory: {self.cwd}",
+                f"- branch: {self.branch}",
+                f"- default_branch: {self.default_branch}",
+                "- working tree status:",
+                self.status,
+                "- recent_commits:",
+                commits,
+                "Project instructions:",
+                docs,
+            )
+        )
 
     def fingerprint(self) -> str:
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，
