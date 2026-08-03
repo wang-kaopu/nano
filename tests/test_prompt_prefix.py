@@ -60,6 +60,16 @@ def test_build_prompt_prefix_includes_memory_system_when_provided(tmp_path):
     assert "/index/MEMORY.md" in prefix.text
 
 
+def test_build_prompt_prefix_includes_skill_descriptions_when_provided(tmp_path):
+    workspace = WorkspaceContext.build(tmp_path)
+    tools = build_tool_registry(_Agent(tmp_path))
+
+    prefix = build_prompt_prefix(workspace=workspace, tools=tools, skill_descriptions="# Available Skills\n- **/commit**: Create a commit")
+
+    assert "# Available Skills" in prefix.dynamic_system
+    assert "**/commit**: Create a commit" in prefix.text
+
+
 def test_build_dynamic_system_context_expands_local_includes_up_to_five_layers(tmp_path):
     instruction_paths = [tmp_path / "AGENTS.md"]
     for depth in range(1, MAX_INCLUDE_DEPTH + 2):

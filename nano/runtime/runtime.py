@@ -22,6 +22,7 @@ from nano.memory import memory as memorylib
 from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS
 from nano.runtime.context_manager import ContextManager
 from nano.runtime.prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
+from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.security import REDACTED_VALUE
@@ -98,6 +99,7 @@ class Nano:
         self.session["memory"] = self.memory.to_dict()
         self.tools = self._apply_tool_allowlist(self.build_tools())
         self.tool_executor = ToolExecutor(self)
+        self._skill_prompt_hash = ""
         self.prefix_state = self.build_prefix()
         self.prefix = self.prefix_state.text
         self.context_manager = ContextManager(self)
@@ -213,10 +215,13 @@ class Nano:
     def build_prefix(self) -> PromptPrefix:
         memory_prompt_section = self.memory.memory_prompt_section() if self.feature_enabled("memory") else ""
         self._memory_prompt_hash = hashlib.sha256(memory_prompt_section.encode("utf-8")).hexdigest()
+        skill_descriptions = build_skill_descriptions(self.root)
+        self._skill_prompt_hash = hashlib.sha256(skill_descriptions.encode("utf-8")).hexdigest()
         return build_prompt_prefix(
             workspace=self.workspace,
             tools=self.tools,
             memory_prompt_section=memory_prompt_section,
+            skill_descriptions=skill_descriptions,
             native_tool_calls=self.model_client.supports_native_tool_calls,
         )
 
@@ -240,8 +245,10 @@ class Nano:
         current_memory_prompt_hash = hashlib.sha256(
             (self.memory.memory_prompt_section() if self.feature_enabled("memory") else "").encode("utf-8")
         ).hexdigest()
+        current_skill_prompt_hash = hashlib.sha256(build_skill_descriptions(self.root).encode("utf-8")).hexdigest()
         memory_changed = current_memory_prompt_hash != previous_memory_prompt_hash
-        prefix_state = self.build_prefix() if workspace_changed or memory_changed or force or previous_hash is None else self.prefix_state
+        skills_changed = current_skill_prompt_hash != self._skill_prompt_hash
+        prefix_state = self.build_prefix() if workspace_changed or memory_changed or skills_changed or force or previous_hash is None else self.prefix_state
         prefix_changed = force or previous_hash != prefix_state.hash
         if prefix_changed:
             self._apply_prefix_state(prefix_state)

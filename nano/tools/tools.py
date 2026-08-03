@@ -16,6 +16,7 @@ from nano.tools.tool import CanUseTool, PermissionResult, ProgressCallback, Tool
 from nano.tools.tool_context import ToolContext
 from nano.tools.shell_risk import ShellCommandParseError, shell_command_segments
 from nano.permissions import PERMISSIONS_FILE_NAME
+from nano.skills import execute_skill
 from nano.types import ToolArguments as ToolArgumentsPayload
 from nano.workspace.context import IGNORED_PATH_NAMES
 
@@ -93,6 +94,13 @@ class DelegateArguments(ToolArguments):
 
     task: NonEmptyText
     max_steps: int = Field(default=3, ge=1)
+
+
+class SkillArguments(ToolArguments):
+    """调用项目 Skill 所需的参数。"""
+
+    skill_name: NonEmptyText
+    args: str = ""
 
 
 class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
@@ -222,6 +230,7 @@ TOOL_EXAMPLES = {
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
     "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    "skill": '<tool>{"name":"skill","args":{"skill_name":"commit","args":"stage the current changes"}}</tool>',
 }
 
 
@@ -321,6 +330,11 @@ def _validate_workspace_input(context: ToolContext, name: str, args: ToolArgumen
             raise ValueError("task must not be empty")
         if context.depth >= context.max_depth:
             raise ValueError("delegate depth exceeded")
+        return
+
+    if name == "skill":
+        if not str(args.get("skill_name", "")).strip():
+            raise ValueError("skill_name must not be empty")
         return
 
     raise ValueError(f"unknown tool: {name}")
@@ -459,6 +473,15 @@ def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
     return context.spawn_delegate(args)
 
 
+def tool_skill(context: ToolContext, args: ToolArgumentsPayload) -> str:
+    """展开项目 Skill，并将其提示词作为模型下一步指令返回。"""
+    skill_name = str(args["skill_name"])
+    result = execute_skill(skill_name, str(args.get("args", "")), workspace_root=context.root)
+    if result is None:
+        return f"Unknown skill: {skill_name}"
+    return f'[Skill "{skill_name}" activated]\n\n{result["prompt"]}'
+
+
 TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
     WorkspaceTool(
         name="list_files",
@@ -527,6 +550,15 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
         runner=tool_delegate,
         read_only=True,
         concurrency_safe=False,
+    ),
+    WorkspaceTool(
+        name="skill",
+        input_schema=SkillArguments,
+        description_text="Invoke a registered project skill and return its expanded instructions.",
+        prompt_text="Use skill when an available Skill matches the user's request; follow its returned instructions in the next response.",
+        runner=tool_skill,
+        read_only=True,
+        concurrency_safe=True,
     ),
 )
 

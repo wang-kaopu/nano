@@ -26,6 +26,7 @@ from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import Nano
+from nano.skills import get_skill_by_name, resolve_skill_prompt, discover_skills
 from nano.storage.session_store import SessionStore
 from nano.utils.text import middle
 from nano.workspace.context import WorkspaceContext
@@ -50,7 +51,6 @@ WELCOME_NAME = "nano"
 WELCOME_SUBTITLE = "local coding agent"
 WELCOME_STATUS = "calm shell, ready for work"
 SLASH_COMMANDS = ("/help", "/memory", "/session", "/resume", "/reset", "/exit", "/quit")
-SLASH_COMMAND_COMPLETER = WordCompleter(SLASH_COMMANDS, sentence=True)
 HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
@@ -177,6 +177,19 @@ def _print_streamed_response(agent, user_message: str) -> None:
         print()
         return
     print(answer)
+
+
+def _resolve_user_skill_command(agent, user_input: str) -> tuple[str, str] | None:
+    """识别用户 `/skill 参数` 输入，并返回已展开的 Skill 提示词。"""
+    if not user_input.startswith("/"):
+        return None
+    space_index = user_input.find(" ")
+    command_name = user_input[1:space_index] if space_index > 0 else user_input[1:]
+    command_args = user_input[space_index + 1 :] if space_index > 0 else ""
+    skill = get_skill_by_name(command_name, agent.root)
+    if skill is None or not skill.user_invocable:
+        return None
+    return skill.name, resolve_skill_prompt(skill, command_args)
 
 
 SLASH_COMMAND_KEY_BINDINGS = KeyBindings()
@@ -434,7 +447,10 @@ def main(argv=None):
         return 0
 
     prompt_session = PromptSession(
-        completer=SLASH_COMMAND_COMPLETER,
+        completer=WordCompleter(
+            [*SLASH_COMMANDS, *(f"/{skill.name}" for skill in discover_skills(agent.root) if skill.user_invocable)],
+            sentence=True,
+        ),
         complete_while_typing=True,
         complete_style=CompleteStyle.MULTI_COLUMN,
         key_bindings=SLASH_COMMAND_KEY_BINDINGS,
@@ -520,6 +536,12 @@ def main(argv=None):
             agent.reset()
             print("session reset")
             continue
+
+        skill_command = _resolve_user_skill_command(agent, user_input)
+        if skill_command is not None:
+            skill_name, resolved_prompt = skill_command
+            print(f"Invoking skill: {skill_name}")
+            user_input = resolved_prompt
 
         print()
         try:

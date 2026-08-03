@@ -55,7 +55,7 @@ def build_user_system_reminder(workspace) -> str:
     return workspace.user_system_reminder_text()
 
 
-def build_prompt_prefix(workspace, tools, memory_prompt_section="", built_at=None, native_tool_calls=False):
+def build_prompt_prefix(workspace, tools, memory_prompt_section="", skill_descriptions="", built_at=None, native_tool_calls=False):
     """构建包含工作规范、工具协议和工作区元数据的稳定提示词前缀。"""
     dynamic_system_context = build_dynamic_system_context(workspace)
     # prefix 可以理解成 agent 的“工作手册”：
@@ -108,6 +108,8 @@ def build_prompt_prefix(workspace, tools, memory_prompt_section="", built_at=Non
     dynamic_system = "# 2. System\n" + dynamic_system_context
     if memory_prompt_section:
         dynamic_system += "\n\n" + memory_prompt_section
+    if skill_descriptions:
+        dynamic_system += "\n\n" + skill_descriptions
     text = "\n\n".join((static_system, dynamic_system))
     signature = tool_signature(tools)
     return PromptPrefix(

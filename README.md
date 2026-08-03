@@ -27,6 +27,27 @@
 - provider 遇到 429、503、529、连接重置、超时或 `overloaded` 时最多重试 3 次；等待时间为 `min(1000 × 2^attempt, 30000) + random(0, 1000)` 毫秒，以指数退避和抖动避免重试风暴
 - 模型上下文保留最新消息；达到 6 条后只保留最近 3 条，完整运行过程仍写入 run trace
 
+## Skills
+
+项目可在 `.nano/skills/<skill-name>/SKILL.md` 定义可复用的任务指令。Skill 使用 YAML frontmatter，正文会作为模型执行指令；`$ARGUMENTS` 和 `${ARGUMENTS}` 会替换为 `/skill` 后的参数，`${CLAUDE_SKILL_DIR}` 会替换为当前 Skill 的目录绝对路径。
+
+```md
+---
+name: commit
+description: Create a git commit with a descriptive message
+when_to_use: When the user asks to commit changes or says "commit"
+allowed-tools: run_shell, read_file
+user-invocable: true
+---
+Look at the current git diff and staged changes.
+
+The user's request: $ARGUMENTS
+
+Project skill directory: ${CLAUDE_SKILL_DIR}
+```
+
+`user-invocable: true` 的 Skill 可在交互模式中通过 `/commit` 或 `/commit 参数` 调用。所有已发现 Skill 都会写入 system prompt；模型可通过 `skill` 工具展开匹配的 Skill。`user-invocable: false` 的 Skill 仅供模型主动调用。
+
 ## 使用截图
 
 CLI 帮助信息：
