@@ -170,10 +170,12 @@ def build_memory_prompt_section(memory_dir: Path | None = None) -> str:
 You have a persistent, file-based memory system at `{memory_dir}`.
 
 ## Memory Types
-- **user**: User's role, preferences, knowledge level
-- **feedback**: Corrections and guidance from the user
-- **project**: Ongoing work, goals, deadlines, decisions
-- **reference**: Pointers to external resources
+- **user**: User's role, preferences, and knowledge level. Save when these become known.
+- **feedback**: User corrections and validated positive agent behavior. Save both; the body must include `**Why:**` and `**How to apply:**`.
+- **project**: Project progress, decisions, deadlines, and goals. Convert relative dates to absolute ISO dates before saving, for example `Thursday` to `2026-03-05`.
+- **reference**: Locations of external systems and resources.
+
+These are the only memory types. Do not create free-form tags or additional categories.
 
 ## How to Save Memories
 Use the write_file tool to create a memory file in `{memory_dir}`. Name files `{{type}}_{{slugified_name}}.md` and use this format:

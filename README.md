@@ -234,7 +234,9 @@ NANO_ANTHROPIC_MODEL="claude-sonnet-4-6"
 
 ## 项目记忆
 
-持久记忆以独立 Markdown 文件保存在 `.nano/projects/<cwd-sha256 前 16 位>/memory/`。`MEMORY.md` 是自动维护的索引；其他文件以 `{type}_{slugified_name}.md` 命名，并使用 `name`、`description`、`type` 三个 YAML frontmatter 字段。可用类型为 `user`、`feedback`、`project` 和 `reference`。
+持久记忆以独立 Markdown 文件保存在 `.nano/projects/<cwd-sha256 前 16 位>/memory/`。`MEMORY.md` 是自动维护的索引；其他文件以 `{type}_{slugified_name}.md` 命名，并使用 `name`、`description`、`type` 三个 YAML frontmatter 字段。类型是封闭集合：`user` 记录用户身份、偏好和知识背景；`feedback` 记录用户的纠正及验证过的正向行为；`project` 记录项目进展、决策和截止日期；`reference` 记录外部系统位置。
+
+`feedback` 正文必须包含 `**Why:**` 和 `**How to apply:**`，使规则在边界情况中可判断。`project` 记忆必须把“周四”“下周”等相对日期改为绝对 ISO 日期，例如 `2026-03-05`，避免记忆过期后失去语义。
 
 模型保存记忆时使用 `write_file` 直接写入该目录。每次请求会将文件名和描述交给同一模型的 side query 进行语义选择；完整正文只读取最多 5 条未在当前会话展示过的记忆。单文件最多 4KB，整场会话累计最多 60KB。
 
