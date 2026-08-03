@@ -225,7 +225,7 @@ def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     load_project_env(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
-    store = SessionStore(workspace.repo_root + "/.nano/sessions")
+    store = SessionStore(workspace.repo_root + "/.nano/sessions", secret_env_names=configured_secret_names)
     model = _build_model_client(args)
     session_id = args.resume
     if session_id == "latest":

@@ -549,7 +549,7 @@ class Nano:
             self.current_task_state,
             self.current_task_state.tool_steps + 1,
             str(tool_name),
-            str(content),
+            self.redact_text(content),
         )
         return str(path.relative_to(self.root))
 
