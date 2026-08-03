@@ -162,13 +162,25 @@ class ToolExecutor:
                 ),
             )
 
-        if not tool.is_read_only(input_value) and not agent.approve(tool.name, args):
+        if not tool.is_read_only(input_value) and agent.read_only:
             return ToolExecutionResult(
                 content=f"error: approval denied for {name}",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="approval_denied",
-                    security_event_type="read_only_block" if agent.read_only else "approval_denied",
+                    security_event_type="read_only_block",
+                    risk_level="high",
+                    read_only=False,
+                ),
+            )
+
+        if tool.requires_approval(input_value) and not agent.approve(tool.name, args):
+            return ToolExecutionResult(
+                content=f"error: approval denied for {name}",
+                metadata=_metadata(
+                    "rejected",
+                    tool_error_code="approval_denied",
+                    security_event_type="approval_denied",
                     risk_level="high",
                     read_only=False,
                 ),

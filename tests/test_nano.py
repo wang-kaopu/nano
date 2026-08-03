@@ -20,7 +20,7 @@ from nano import (
     build_welcome,
 )
 from nano.runtime.query_events import ModelStreamEvent
-from nano.runtime.task_state import STOP_REASON_USER_INTERRUPTED
+from nano.runtime.task_state import STOP_REASON_APPROVAL_DENIED, STOP_REASON_USER_INTERRUPTED
 from nano.tools.tool_executor import ToolExecutionResult
 
 
@@ -74,6 +74,25 @@ def test_agent_runs_tool_then_final(tmp_path):
     assert answer == "Read the file successfully."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
     assert "hello.txt" in agent.session["memory"]["files"]
+
+
+def test_approval_denial_stops_before_the_model_can_try_an_alternative_command(tmp_path):
+    """拒绝危险命令后必须结束运行，不能给模型第二次绕过审批的机会。"""
+    agent = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"run_shell","args":{"command":"git rm -f README.md","timeout":20}}</tool>',
+            "<final>README was deleted.</final>",
+        ],
+        approval_policy="never",
+    )
+
+    answer = agent.ask("Delete README.md")
+
+    assert answer == "Operation was not executed because approval was denied."
+    assert agent.current_task_state.stop_reason == STOP_REASON_APPROVAL_DENIED
+    assert len(agent.model_client.prompts) == 1
+    assert (tmp_path / "README.md").exists()
 
 
 def test_agent_updates_task_summary_on_each_request(tmp_path):

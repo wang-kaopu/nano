@@ -46,8 +46,24 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
     assert "path escapes workspace" in result
 
 
-def test_risky_tool_deny_behavior(tmp_path):
+def test_safe_shell_command_does_not_require_approval(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+
+    assert "exit_code: 0" in result
+
+
+def test_dangerous_shell_command_requires_approval(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="never")
+
+    result = agent.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
+
+    assert result == "error: approval denied for run_shell"
+
+
+def test_read_only_agent_cannot_run_safe_shell_command(tmp_path):
+    agent = build_agent(tmp_path, [], approval_policy="auto", read_only=True)
 
     result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
@@ -218,7 +234,6 @@ def test_delegate_child_is_read_only(tmp_path):
         [
             '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
             '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
-            "<final>child done</final>",
             "<final>parent done</final>",
         ],
     )

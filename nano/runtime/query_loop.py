@@ -205,6 +205,9 @@ class QueryLoop:
                             **dict(tool_result.metadata or {}),
                         },
                     )
+                    if tool_result.metadata.get("tool_error_code") == "approval_denied":
+                        yield QueryEvent("stopped", {"reason": "approval_denied"})
+                        return
                 if anthropic_tool_results:
                     native_input.append({"role": "user", "content": anthropic_tool_results})
                 yield QueryEvent("next_turn", {"reason": "next_turn"})

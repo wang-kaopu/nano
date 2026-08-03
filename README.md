@@ -245,11 +245,13 @@ uv run nano --provider ollama --model qwen3.5:4b
 
 ## 安全与持久化
 
-`nano` 不会默认把所有动作都放开。像 shell 执行、文件写入这类高风险操作，会受审批模式控制：
+`nano` 不会默认把所有动作都放开。文件写入始终受审批模式控制；`run_shell` 会用 `bashlex` 解析 Bash AST，并且仅放行明确安全的检查、构建和测试命令。未知命令、动态 shell 执行、重定向、文件/仓库/基础设施变更都会要求审批；无法解析为 AST 的命令会在执行前拒绝。
 
 - `--approval ask`
 - `--approval auto`
 - `--approval never`
+
+无需审批的 shell 命令包括本地检查（如 `rg`、`git status`、`git diff`）及常见检查、构建、测试（如 `pytest`、`ruff`、`pyright`、`uv run pytest`、`npm test`、`npm run build`）。`git rm`、`rm`、`find -delete`、`git push`、`docker`、`kubectl`、`terraform`、脚本解释器、输出重定向与所有未列入安全白名单的命令都需要审批。用户拒绝审批时，本次运行会立即停止，不能改用替代命令绕过该决定。
 
 每次运行结束后，都会在 `.nano/runs/<run_id>/` 下写出这些文件：
 

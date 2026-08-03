@@ -87,6 +87,10 @@ class TaskState(BaseModel):
         """标记运行达到模型重试上限。"""
         return self.stop(STOP_REASON_RETRY_LIMIT_REACHED, final_answer=final_answer)
 
+    def stop_approval_denied(self, final_answer: str = "") -> "TaskState":
+        """标记危险操作因用户拒绝审批而终止。"""
+        return self.stop(STOP_REASON_APPROVAL_DENIED, final_answer=final_answer)
+
     def stop_model_error(self, final_answer: str = "") -> "TaskState":
         """标记模型调用失败。"""
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)

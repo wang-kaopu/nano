@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from nano.tools.tool import CanUseTool, PermissionResult, ProgressCallback, Tool, ToolProgressData, ToolResult
 from nano.tools.tool_context import ToolContext
+from nano.tools.shell_risk import ShellCommandParseError, analyze_shell_command, requires_shell_approval
 from nano.types import ToolArguments as ToolArgumentsPayload
 from nano.workspace.context import IGNORED_PATH_NAMES
 
@@ -62,6 +63,13 @@ class RunShellArguments(ToolArguments):
     timeout: int = Field(default=20, ge=1, le=120)
 
 
+def requires_run_shell_approval(args: ToolArguments) -> bool:
+    """根据已校验的 shell 命令 AST 决定是否需要人工审批。"""
+    if not isinstance(args, RunShellArguments):
+        raise TypeError("run_shell approval requires RunShellArguments")
+    return requires_shell_approval(args.command)
+
+
 class WriteFileArguments(ToolArguments):
     """写入文件所需的参数。"""
 
@@ -98,6 +106,7 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         read_only: bool,
         concurrency_safe: bool,
         destructive: bool = False,
+        approval_required: Callable[[ToolArguments], bool] | None = None,
         aliases: tuple[str, ...] = (),
     ) -> None:
         """初始化由已有工作区执行函数驱动的工具。"""
@@ -108,6 +117,7 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         self.read_only = read_only
         self.concurrency_safe = concurrency_safe
         self.destructive = destructive
+        self.approval_required = approval_required
 
     def description(self, input_value: ToolArguments | None, options: Mapping[str, Any] | None = None) -> str:
         """返回工具能力说明。"""
@@ -129,11 +139,19 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         """返回当前工具输入是否可能修改工作区或执行命令。"""
         return self.destructive
 
+    def requires_approval(self, input_value: ToolArguments) -> bool:
+        """返回当前输入是否需要按运行时审批策略人工确认。"""
+        if self.approval_required is not None:
+            return self.approval_required(input_value)
+        return super().requires_approval(input_value)
+
     def check_permissions(self, input_value: ToolArguments, context: ToolContext) -> PermissionResult:
         """执行工作区路径、文件状态和委派深度检查。"""
         try:
             _validate_workspace_input(context, self.name, input_value.model_dump(mode="python"))
-        except ValueError as exc:
+            if self.name == "run_shell" and isinstance(input_value, RunShellArguments):
+                analyze_shell_command(input_value.command)
+        except (ShellCommandParseError, ValueError) as exc:
             return PermissionResult.deny(str(exc), input_value)
         return PermissionResult.allow(input_value)
 
@@ -194,7 +212,7 @@ TOOL_EXAMPLES = {
     "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
     "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
     "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
+    "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
     "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
@@ -472,6 +490,7 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
         read_only=False,
         concurrency_safe=False,
         destructive=True,
+        approval_required=requires_run_shell_approval,
     ),
     WorkspaceTool(
         name="write_file",

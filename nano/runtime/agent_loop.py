@@ -98,6 +98,9 @@ class QueryEngine:
                     if event.payload["reason"] == "retry_limit_reached":
                         final = "Stopped after too many malformed model responses without a valid tool call or final answer."
                         task_state.stop_retry_limit(final)
+                    elif event.payload["reason"] == "approval_denied":
+                        final = "Operation was not executed because approval was denied."
+                        task_state.stop_approval_denied(final)
                     else:
                         final = "Stopped after reaching the step limit without a final answer."
                         task_state.stop_step_limit(final)
