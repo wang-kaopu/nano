@@ -1,10 +1,10 @@
 import json
 
-from pico.session_store import SessionStore
+from nano.session_store import SessionStore
 
 
 def test_session_store_saves_loads_and_finds_latest_session(tmp_path):
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = SessionStore(tmp_path / ".nano" / "sessions")
     first = {"id": "session_001", "history": [{"role": "user", "content": "first"}]}
     second = {"id": "session_002", "history": [{"role": "user", "content": "second"}]}
 
@@ -22,6 +22,6 @@ def test_session_store_saves_loads_and_finds_latest_session(tmp_path):
 
 
 def test_session_store_latest_is_none_when_empty(tmp_path):
-    store = SessionStore(tmp_path / ".pico" / "sessions")
+    store = SessionStore(tmp_path / ".nano" / "sessions")
 
     assert store.latest() is None

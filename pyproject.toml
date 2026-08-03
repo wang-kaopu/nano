@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pico"
+name = "nano"
 version = "0.1.0"
 description = "Small local coding agent for DeepSeek, OpenAI-compatible, Anthropic-compatible, and Ollama models"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pico = "pico.cli:main"
+nano = "nano.cli:main"
 
 [dependency-groups]
 dev = [
@@ -23,15 +23,15 @@ dev = [
 ]
 
 [tool.pyright]
-include = ["pico"]
+include = ["nano"]
 pythonVersion = "3.10"
 typeCheckingMode = "basic"
 
 [tool.setuptools.packages.find]
-include = ["pico*"]
+include = ["nano*"]
 
 [tool.setuptools.package-data]
-pico = ["py.typed"]
+nano = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

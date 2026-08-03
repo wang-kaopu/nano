@@ -1,8 +1,8 @@
 from pathlib import Path
 
-from pico.tool import CanUseTool, Tool, ToolProgressData, ToolResult
-from pico.tool_context import ToolContext
-from pico.tools import ReadFileArguments, build_tool_registry, tool_delegate, tool_json_schema, tool_read_file
+from nano.tool import CanUseTool, Tool, ToolProgressData, ToolResult
+from nano.tool_context import ToolContext
+from nano.tools import ReadFileArguments, build_tool_registry, tool_delegate, tool_json_schema, tool_read_file
 
 
 class DefaultTool(Tool[ReadFileArguments, str, ToolProgressData]):
@@ -21,7 +21,7 @@ class DefaultTool(Tool[ReadFileArguments, str, ToolProgressData]):
         return ToolResult(output="ok", content="ok")
 
 
-def test_tool_context_supports_file_tools_without_full_pico(tmp_path):
+def test_tool_context_supports_file_tools_without_full_nano(tmp_path):
     (tmp_path / "sample.txt").write_text("alpha\n", encoding="utf-8")
     context = ToolContext(
         root=tmp_path,
