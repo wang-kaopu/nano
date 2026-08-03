@@ -245,13 +245,24 @@ uv run nano --provider ollama --model qwen3.5:4b
 
 ## 安全与持久化
 
-`nano` 不会默认把所有动作都放开。文件写入始终受审批模式控制；`run_shell` 会用 `bashlex` 解析 Bash AST，并且仅放行明确安全的检查、构建和测试命令。未知命令、动态 shell 执行、重定向、文件/仓库/基础设施变更都会要求审批；无法解析为 AST 的命令会在执行前拒绝。
+`nano` 不会默认把所有动作都放开。仓库根目录的 `permissions.json` 定义项目级工具策略；默认策略已随项目提交。`run_shell` 会用 `bashlex` 解析 Bash AST，复合命令中的每个片段都需要独立匹配 allow 规则，避免用安全前缀夹带危险子命令。无法解析为 AST 的命令会在执行前拒绝。
 
 - `--approval ask`
 - `--approval auto`
 - `--approval never`
 
-无需审批的 shell 命令包括本地检查（如 `rg`、`git status`、`git diff`）及常见检查、构建、测试（如 `pytest`、`ruff`、`pyright`、`uv run pytest`、`npm test`、`npm run build`）。`git rm`、`rm`、`find -delete`、`git push`、`docker`、`kubectl`、`terraform`、脚本解释器、输出重定向与所有未列入安全白名单的命令都需要审批。用户拒绝审批时，本次运行会立即停止，不能改用替代命令绕过该决定。
+规则使用 glob 模式，支持普通工具名和 `run_shell(...)`：allow 命中可免审批，未命中则继续走审批，deny 命中则直接拒绝执行。deny 永远优先于 allow，因此可以先放开一组命令再排除危险子命令：
+
+```json
+{
+  "permissions": {
+    "allow": ["run_shell(git *)"],
+    "deny": ["run_shell(git push --force*)"]
+  }
+}
+```
+
+`permissions.json` 默认只放行本地检查及常见构建、测试命令，例如 `rg`、`git status`、`git diff`、`pytest`、`ruff`、`pyright`、`uv run pytest`、`npm test` 与 `npm run build`；默认 `deny` 为空，未被 allow 的命令继续走审批。项目需要硬禁止某类命令时，可自行在 `deny` 中添加规则。用户拒绝审批时，本次运行会立即停止，不能改用替代命令绕过该决定。
 
 每次运行结束后，都会在 `.nano/runs/<run_id>/` 下写出这些文件：
 

@@ -105,7 +105,7 @@ class Tool(Generic[InputT, OutputT, ProgressT]):
         """判断给定输入是否可能产生不可逆副作用。"""
         return False
 
-    def requires_approval(self, input_value: InputT) -> bool:
+    def requires_approval(self, input_value: InputT, context: Any | None = None) -> bool:
         """判断本次工具调用是否需要遵循运行时审批策略。"""
         return not self.is_read_only(input_value)
 

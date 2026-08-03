@@ -47,6 +47,10 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
 
 
 def test_safe_shell_command_does_not_require_approval(tmp_path):
+    (tmp_path / "permissions.json").write_text(
+        '{"permissions":{"allow":["run_shell(echo*)"],"deny":[]}}',
+        encoding="utf-8",
+    )
     agent = build_agent(tmp_path, [], approval_policy="never")
 
     result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
@@ -60,6 +64,20 @@ def test_dangerous_shell_command_requires_approval(tmp_path):
     result = agent.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
 
     assert result == "error: approval denied for run_shell"
+
+
+def test_project_deny_rule_blocks_shell_command_even_when_approval_is_automatic(tmp_path):
+    """项目 deny 是硬拒绝，不能被 --approval auto 覆盖。"""
+    (tmp_path / "permissions.json").write_text(
+        '{"permissions":{"allow":["run_shell"],"deny":["run_shell(git rm*)"]}}',
+        encoding="utf-8",
+    )
+    agent = build_agent(tmp_path, [], approval_policy="auto")
+
+    result = agent.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
+
+    assert "permission denied by permissions.json" in result
+    assert (tmp_path / "README.md").exists()
 
 
 def test_read_only_agent_cannot_run_safe_shell_command(tmp_path):

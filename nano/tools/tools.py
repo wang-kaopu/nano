@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_vali
 
 from nano.tools.tool import CanUseTool, PermissionResult, ProgressCallback, Tool, ToolProgressData, ToolResult
 from nano.tools.tool_context import ToolContext
-from nano.tools.shell_risk import ShellCommandParseError, analyze_shell_command, requires_shell_approval
+from nano.tools.shell_risk import ShellCommandParseError, shell_command_segments
+from nano.permissions import PERMISSIONS_FILE_NAME
 from nano.types import ToolArguments as ToolArgumentsPayload
 from nano.workspace.context import IGNORED_PATH_NAMES
 
@@ -63,11 +64,13 @@ class RunShellArguments(ToolArguments):
     timeout: int = Field(default=20, ge=1, le=120)
 
 
-def requires_run_shell_approval(args: ToolArguments) -> bool:
+def requires_run_shell_approval(args: ToolArguments, context: ToolContext | None = None) -> bool:
     """根据已校验的 shell 命令 AST 决定是否需要人工审批。"""
     if not isinstance(args, RunShellArguments):
         raise TypeError("run_shell approval requires RunShellArguments")
-    return requires_shell_approval(args.command)
+    if context is not None and context.permissions.decision("run_shell", args.command) == "allow":
+        return False
+    return True
 
 
 class WriteFileArguments(ToolArguments):
@@ -106,7 +109,7 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         read_only: bool,
         concurrency_safe: bool,
         destructive: bool = False,
-        approval_required: Callable[[ToolArguments], bool] | None = None,
+        approval_required: Callable[[ToolArguments, ToolContext | None], bool] | None = None,
         aliases: tuple[str, ...] = (),
     ) -> None:
         """初始化由已有工作区执行函数驱动的工具。"""
@@ -139,18 +142,21 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         """返回当前工具输入是否可能修改工作区或执行命令。"""
         return self.destructive
 
-    def requires_approval(self, input_value: ToolArguments) -> bool:
+    def requires_approval(self, input_value: ToolArguments, context: ToolContext | None = None) -> bool:
         """返回当前输入是否需要按运行时审批策略人工确认。"""
         if self.approval_required is not None:
-            return self.approval_required(input_value)
-        return super().requires_approval(input_value)
+            return self.approval_required(input_value, context)
+        return super().requires_approval(input_value, context)
 
     def check_permissions(self, input_value: ToolArguments, context: ToolContext) -> PermissionResult:
         """执行工作区路径、文件状态和委派深度检查。"""
         try:
             _validate_workspace_input(context, self.name, input_value.model_dump(mode="python"))
+            command = input_value.command if isinstance(input_value, RunShellArguments) else None
+            if context.permissions.decision(self.name, command) == "deny":
+                return PermissionResult.deny(f"permission denied by {PERMISSIONS_FILE_NAME}", input_value)
             if self.name == "run_shell" and isinstance(input_value, RunShellArguments):
-                analyze_shell_command(input_value.command)
+                shell_command_segments(input_value.command)
         except (ShellCommandParseError, ValueError) as exc:
             return PermissionResult.deny(str(exc), input_value)
         return PermissionResult.allow(input_value)
@@ -480,6 +486,7 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
         runner=tool_search,
         read_only=True,
         concurrency_safe=True,
+        aliases=("grep_search",),
     ),
     WorkspaceTool(
         name="run_shell",

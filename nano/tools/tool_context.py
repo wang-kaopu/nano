@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 
+from nano.permissions import ProjectPermissions
 from nano.types import Environment, ToolArguments
 
 
@@ -16,6 +17,7 @@ class ToolContext:
     max_depth: int
     spawn_delegate: Callable[[ToolArguments], str]
     read_file_state: dict[str, int] = field(default_factory=dict)
+    permissions: ProjectPermissions = field(default_factory=ProjectPermissions.empty)
 
     def path(self, raw_path: str) -> Path:
         return self.path_resolver(str(raw_path))

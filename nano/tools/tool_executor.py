@@ -174,7 +174,7 @@ class ToolExecutor:
                 ),
             )
 
-        if tool.requires_approval(input_value) and not agent.approve(tool.name, args):
+        if tool.requires_approval(input_value, agent.tool_context()) and not agent.approve(tool.name, args):
             return ToolExecutionResult(
                 content=f"error: approval denied for {name}",
                 metadata=_metadata(

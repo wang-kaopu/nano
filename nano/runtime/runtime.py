@@ -17,6 +17,7 @@ from typing import Any
 import nano.runtime.checkpoint as checkpointlib
 import nano.tools.security as securitylib
 import nano.tools.tools as toolkit
+from nano.permissions import load_project_permissions
 from nano.memory import memory as memorylib
 from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS
 from nano.runtime.context_manager import ContextManager
@@ -77,6 +78,7 @@ class Nano:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
+        self.permissions = load_project_permissions(self.root)
         self.read_file_state: dict[str, int] = {}
         self.session_store = session_store
         self.approval_policy = approval_policy
@@ -643,6 +645,7 @@ class Nano:
             max_depth=self.max_depth,
             spawn_delegate=self.spawn_delegate,
             read_file_state=self.read_file_state,
+            permissions=self.permissions,
         )
 
     def spawn_delegate(self, args):
