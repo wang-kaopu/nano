@@ -17,4 +17,4 @@ Agent Harness v1 is Nano's current runtime shape: a local control loop around a 
 
 - `task_state.json` records attempts, tool steps, status, stop reason, and final answer.
 - `trace.jsonl` records the event timeline for prompt, model, tool, checkpoint, and finish phases.
-- `report.json` records the review summary, prompt metadata, durable memory changes, and execution metadata.
+- `report.json` records the review summary, prompt metadata, and execution metadata. Persistent memories are independent Markdown files under `.nano/projects/<cwd-hash>/memory/`.

@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 if TYPE_CHECKING:
     from nano.runtime.query_events import ModelStreamEvent
+
+ToolArguments: TypeAlias = Mapping[str, Any]
 
 class ModelClient(Protocol):
     """定义运行时可调用的统一模型客户端接口。"""
 
     model: str
+    base_url: str
     supports_prompt_cache: bool
     supports_native_tool_calls: bool
     native_tool_call_protocol: str

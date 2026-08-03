@@ -1,4 +1,13 @@
-from nano.memory.memory import LayeredMemory
+from nano.memory.frontmatter import parse_frontmatter
+from nano.memory.memory import (
+    MAX_INDEX_BYTES,
+    MAX_INDEX_LINES,
+    MAX_MEMORY_BYTES_PER_FILE,
+    LayeredMemory,
+    get_memory_dir,
+    load_memory_index,
+    save_memory,
+)
 
 
 def test_working_memory_tracks_summary_and_recent_files():
@@ -13,37 +22,79 @@ def test_working_memory_tracks_summary_and_recent_files():
 
     assert snapshot["working"]["task_summary"] == "Investigate flaky tests"
     assert snapshot["working"]["recent_files"] == ["src/app.py", "README.md"]
-    assert snapshot["task"] == "Investigate flaky tests"
-    assert snapshot["files"] == ["src/app.py", "README.md"]
 
 
-def test_episodic_notes_append_and_retrieve_deterministically():
-    memory = LayeredMemory()
+def test_file_memory_is_saved_with_frontmatter_and_indexed_by_project_hash(tmp_path):
+    memory_dir = get_memory_dir(tmp_path)
 
-    memory.append_note("Exact tag note", tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
-    memory.append_note("Keyword overlap note about memory", created_at="2026-04-07T10:01:00+00:00")
-    memory.append_note("Newest unrelated note", created_at="2026-04-07T10:02:00+00:00")
-    memory.append_note("Older unrelated note", created_at="2026-04-07T09:59:00+00:00")
+    filename = save_memory(
+        "Do not add response summaries",
+        "The user prefers direct final responses.",
+        "feedback",
+        'The user said "do not add a summary at the end".\n\n**Why:** They review the diff directly.',
+        memory_dir,
+    )
 
-    snapshot = memory.to_dict()
-    assert [note["text"] for note in snapshot["episodic_notes"]] == [
-        "Exact tag note",
-        "Keyword overlap note about memory",
-        "Newest unrelated note",
-        "Older unrelated note",
-    ]
-    assert snapshot["notes"] == [
-        "Exact tag note",
-        "Keyword overlap note about memory",
-        "Newest unrelated note",
-        "Older unrelated note",
-    ]
+    assert memory_dir == tmp_path / ".nano" / "projects" / memory_dir.parent.name / "memory"
+    assert filename == "feedback_do-not-add-response-summaries.md"
+    parsed = parse_frontmatter((memory_dir / filename).read_text(encoding="utf-8"))
+    assert parsed.meta == {
+        "name": "Do not add response summaries",
+        "description": "The user prefers direct final responses.",
+        "type": "feedback",
+    }
+    assert "They review the diff directly." in parsed.body
+    index = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert "**[Do not add response summaries](feedback_do-not-add-response-summaries.md)** (feedback)" in index
 
-    lines = [line for line in memory.retrieval_view("recall memory", limit=4).splitlines() if line.startswith("- ")]
-    assert lines == [
-        "- Exact tag note",
-        "- Keyword overlap note about memory",
-    ]
+
+def test_memory_index_truncates_by_lines_then_bytes(tmp_path):
+    memory_dir = get_memory_dir(tmp_path)
+    memory_dir.mkdir(parents=True)
+    index_path = memory_dir / "MEMORY.md"
+    index_path.write_text("\n".join(f"entry-{index}" for index in range(MAX_INDEX_LINES + 5)), encoding="utf-8")
+
+    assert "too many memory entries" in load_memory_index(memory_dir)
+
+    index_path.write_text("x" * (MAX_INDEX_BYTES + 1), encoding="utf-8")
+    assert "index too large" in load_memory_index(memory_dir)
+
+
+def test_semantic_recall_reads_selected_files_once_and_applies_file_limit(tmp_path):
+    memory = LayeredMemory(workspace_root=tmp_path)
+    assert memory.memory_dir is not None
+    ci_filename = save_memory(
+        "CI dashboard",
+        "URL and workflow notes for continuous integration.",
+        "reference",
+        "x" * (MAX_MEMORY_BYTES_PER_FILE + 100),
+        memory.memory_dir,
+    )
+    save_memory(
+        "Database notes",
+        "PostgreSQL indexing guidance.",
+        "project",
+        "Unrelated to deployment.",
+        memory.memory_dir,
+    )
+    calls = []
+
+    def side_query(system_prompt, user_prompt):
+        calls.append((system_prompt, user_prompt))
+        return '{"selected_memories": ["' + ci_filename + '"]}'
+
+    selected = memory.select_relevant_memories("How do I deploy?", side_query)
+
+    assert len(selected) == 1
+    assert selected[0].filename == ci_filename
+    assert selected[0].content.endswith("[... truncated, memory file too large ...]")
+    assert len(selected[0].content.encode("utf-8")) <= MAX_MEMORY_BYTES_PER_FILE
+    assert ci_filename in calls[0][1]
+    assert "x" * 100 not in calls[0][1]
+    assert memory.to_dict()["surfaced_memory_bytes"] == len(selected[0].content.encode("utf-8"))
+
+    assert memory.select_relevant_memories("How do I deploy?", side_query) == []
+    assert len(calls) == 2
 
 
 def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
@@ -53,70 +104,7 @@ def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
 
     memory.set_file_summary("./sample.txt", "sample.txt: alpha")
     memory.remember_file("./sample.txt")
-    snapshot = memory.to_dict()["file_summaries"]["sample.txt"]
-
-    assert snapshot["summary"] == "sample.txt: alpha"
-    assert snapshot["freshness"]
 
     assert "sample.txt: alpha" in memory.render_memory_text()
     file_path.write_text("beta\n", encoding="utf-8")
     assert "sample.txt: alpha" not in memory.render_memory_text()
-
-    memory.invalidate_file_summary("sample.txt")
-
-    assert "sample.txt" not in memory.to_dict()["file_summaries"]
-
-
-def test_process_notes_keep_kind_and_latest_duplicate_wins():
-    memory = LayeredMemory()
-
-    memory.append_note(
-        "Shell partial success on README.md; inspect diff before retry",
-        tags=("process", "partial_success"),
-        created_at="2026-04-07T10:00:00+00:00",
-        kind="process",
-    )
-    memory.append_note(
-        "Shell partial success on README.md; inspect diff before retry",
-        tags=("process", "partial_success"),
-        created_at="2026-04-07T10:01:00+00:00",
-        kind="process",
-    )
-
-    notes = memory.to_dict()["episodic_notes"]
-
-    assert len(notes) == 1
-    assert notes[0]["kind"] == "process"
-    assert notes[0]["created_at"] == "2026-04-07T10:01:00+00:00"
-
-
-def test_durable_memory_index_and_topic_notes_are_loaded_and_retrieved(tmp_path):
-    memory_root = tmp_path / ".nano" / "memory"
-    topics_dir = memory_root / "topics"
-    topics_dir.mkdir(parents=True)
-    (memory_root / "MEMORY.md").write_text(
-        "# Durable Memory Index\n\n"
-        "- [project-conventions](topics/project-conventions.md): Project Conventions\n"
-        "  - summary: Stable repository conventions.\n"
-        "  - tags: convention\n",
-        encoding="utf-8",
-    )
-    (topics_dir / "project-conventions.md").write_text(
-        "# Project Conventions\n\n"
-        "- topic: project-conventions\n"
-        "- summary: Stable repository conventions.\n"
-        "- tags: convention\n"
-        "- updated_at: 2026-04-12T08:14:49+00:00\n\n"
-        "## Notes\n"
-        "- Use constrained tools instead of guessing.\n"
-        "- Preserve local agent state under .nano/.\n",
-        encoding="utf-8",
-    )
-
-    memory = LayeredMemory(workspace_root=tmp_path)
-
-    snapshot = memory.to_dict()
-    assert snapshot["durable_topics"] == ["project-conventions"]
-
-    lines = [line for line in memory.retrieval_view("constrained tools", limit=4).splitlines() if line.startswith("- ")]
-    assert any("Use constrained tools instead of guessing." in line for line in lines)

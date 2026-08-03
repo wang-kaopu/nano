@@ -276,7 +276,6 @@ def _set_irrelevant_memory(agent):
             "note_index": 0,
         }
     ]
-    state["notes"] = ["team mascot is blue"]
     state["file_summaries"] = {}
     agent.memory.state = state
     agent.session["memory"] = agent.memory.to_dict()
@@ -375,7 +374,6 @@ def _set_irrelevant_memory_for_task(agent):
             "note_index": 0,
         }
     ]
-    state["notes"] = ["the team mascot is blue"]
     state["file_summaries"] = {}
     agent.memory.state = state
     agent.session["memory"] = agent.memory.to_dict()

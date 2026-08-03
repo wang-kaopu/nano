@@ -55,7 +55,7 @@ HELP_DETAILS = textwrap.dedent(
     """\
     Commands:
     /help    Show this help message.
-    /memory  Show the agent's distilled working memory.
+    /memory  List persistent project memories.
     /session Show the path to the saved session file.
     /resume  Select and resume a saved session.
     /reset   Clear the current session history and memory.
@@ -456,7 +456,13 @@ def main(argv=None):
             print(HELP_DETAILS)
             continue
         if user_input == "/memory":
-            print(agent.memory_text())
+            memories = agent.memory.list_file_memories()
+            if not memories:
+                print("No memories saved yet.")
+            else:
+                print(f"{len(memories)} memories:")
+                for memory in memories:
+                    print(f"    [{memory.type}] {memory.name} - {memory.description}")
             continue
         if user_input == "/session":
             print(agent.session_path)

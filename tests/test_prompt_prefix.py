@@ -50,6 +50,16 @@ def test_build_prompt_prefix_renders_tools_and_workspace_metadata(tmp_path):
     assert prefix.built_at == "2026-06-02T00:00:00+08:00"
 
 
+def test_build_prompt_prefix_includes_memory_system_when_provided(tmp_path):
+    workspace = WorkspaceContext.build(tmp_path)
+    tools = build_tool_registry(_Agent(tmp_path))
+
+    prefix = build_prompt_prefix(workspace=workspace, tools=tools, memory_prompt_section="# Memory System\n/index/MEMORY.md")
+
+    assert "# Memory System" in prefix.dynamic_system
+    assert "/index/MEMORY.md" in prefix.text
+
+
 def test_build_dynamic_system_context_expands_local_includes_up_to_five_layers(tmp_path):
     instruction_paths = [tmp_path / "AGENTS.md"]
     for depth in range(1, MAX_INCLUDE_DEPTH + 2):
@@ -66,6 +76,5 @@ def test_build_dynamic_system_context_expands_local_includes_up_to_five_layers(t
     assert not dynamic_context.startswith(" ")
     assert "Git context:" in dynamic_context
     assert "Project instructions:" in dynamic_context
-    assert f"instruction depth {MAX_INCLUDE_DEPTH}" in dynamic_context
-    assert f"instruction depth {MAX_INCLUDE_DEPTH + 1}" not in dynamic_context
-    assert f"maximum depth {MAX_INCLUDE_DEPTH} reached" in dynamic_context
+    # AGENTS.md 不在静态 system block 中，而是随首条 user 消息单独注入。
+    assert f"instruction depth {MAX_INCLUDE_DEPTH}" not in dynamic_context

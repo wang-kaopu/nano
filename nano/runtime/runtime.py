@@ -40,19 +40,6 @@ DEFAULT_FEATURE_FLAGS = {
 }
 MODEL_CONTEXT_WINDOW = 1_000_000
 CONTEXT_WINDOW_RESERVE = 20_000
-DURABLE_MEMORY_INTENT_PATTERN = re.compile(r"(?i)\b(capture|remember|save|store|persist|note)\b")
-DURABLE_MEMORY_INTENT_ZH_PATTERN = re.compile(r"(记住|保存|记录|沉淀|长期记忆|持久记忆)")
-DURABLE_MEMORY_LINE_PATTERNS = (
-    ("project-conventions", re.compile(r"(?i)^Project convention:\s*(.+)$")),
-    ("key-decisions", re.compile(r"(?i)^Decision:\s*(.+)$")),
-    ("dependency-facts", re.compile(r"(?i)^Dependency:\s*(.+)$")),
-    ("user-preferences", re.compile(r"(?i)^Preference:\s*(.+)$")),
-    ("project-conventions", re.compile(r"^项目约定：\s*(.+)$")),
-    ("key-decisions", re.compile(r"^决策：\s*(.+)$")),
-    ("dependency-facts", re.compile(r"^依赖：\s*(.+)$")),
-    ("user-preferences", re.compile(r"^偏好：\s*(.+)$")),
-)
-SECRET_SHAPED_TEXT_PATTERN = re.compile(r"(?i)(\b(api[_ -]?key|token|secret|password)\b|sk-[A-Za-z0-9_-]{6,})")
 
 __all__ = ["Nano", "SessionStore"]
 
@@ -124,9 +111,7 @@ class Nano:
         self.last_api_call_time = 0.0
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
-        self.last_durable_promotions = []
-        self.last_durable_rejections = []
-        self.last_durable_superseded = []
+        self._memory_prompt_hash = ""
         self._last_tool_result_metadata = {}
         self._last_prefix_refresh = {
             "workspace_changed": False,
@@ -226,9 +211,12 @@ class Nano:
         return tool_signature(self.tools)
 
     def build_prefix(self) -> PromptPrefix:
+        memory_prompt_section = self.memory.memory_prompt_section() if self.feature_enabled("memory") else ""
+        self._memory_prompt_hash = hashlib.sha256(memory_prompt_section.encode("utf-8")).hexdigest()
         return build_prompt_prefix(
             workspace=self.workspace,
             tools=self.tools,
+            memory_prompt_section=memory_prompt_section,
             native_tool_calls=self.model_client.supports_native_tool_calls,
         )
 
@@ -239,6 +227,7 @@ class Nano:
     def refresh_prefix(self, force: bool = False) -> dict[str, bool]:
         previous_hash = self.prefix_state.hash
         previous_workspace_fingerprint = self.prefix_state.workspace_fingerprint
+        previous_memory_prompt_hash = self._memory_prompt_hash
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
@@ -248,7 +237,11 @@ class Nano:
         if workspace_changed:
             self.workspace = refreshed_workspace
 
-        prefix_state = self.build_prefix() if workspace_changed or force or previous_hash is None else self.prefix_state
+        current_memory_prompt_hash = hashlib.sha256(
+            (self.memory.memory_prompt_section() if self.feature_enabled("memory") else "").encode("utf-8")
+        ).hexdigest()
+        memory_changed = current_memory_prompt_hash != previous_memory_prompt_hash
+        prefix_state = self.build_prefix() if workspace_changed or memory_changed or force or previous_hash is None else self.prefix_state
         prefix_changed = force or previous_hash != prefix_state.hash
         if prefix_changed:
             self._apply_prefix_state(prefix_state)
@@ -261,6 +254,10 @@ class Nano:
 
     def memory_text(self) -> str:
         return self.memory.render_memory_text()
+
+    def side_query(self, system_prompt: str, user_prompt: str) -> str:
+        """复用当前配置模型执行低成本语义记忆选择。"""
+        return str(self.model_client.complete(f"{system_prompt}\n\n{user_prompt}", 512, prompt_cache_key=None, prompt_cache_retention=None))
 
     def history_text(self) -> str:
         history = self.session["history"]
@@ -454,6 +451,12 @@ class Nano:
         if not path:
             return
 
+        if name in {"write_file", "patch_file"} and self.memory.memory_dir is not None:
+            resolved_path = self.path(path)
+            if resolved_path.parent == self.memory.memory_dir and resolved_path.suffix == ".md" and resolved_path.name != "MEMORY.md":
+                # Agent 通过通用写文件工具保存记忆后，由运行时保持索引与文件一致。
+                memorylib.update_memory_index(self.memory.memory_dir)
+
         canonical_path = self.memory.canonical_path(path)
         # 不是所有工具结果都进入工作记忆。
         # 读文件会生成摘要；写文件/patch 会让旧摘要失效，因为它们可能过期了。
@@ -484,67 +487,6 @@ class Nano:
         tags = ["process", status, *affected_paths]
         self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
         self.session["memory"] = self.memory.to_dict()
-
-    def reject_durable_reason(self, note_text):
-        text = str(note_text or "").strip()
-        lowered = text.lower()
-        if not text:
-            return "empty"
-        if REDACTED_VALUE in text or SECRET_SHAPED_TEXT_PATTERN.search(text):
-            return "secret_shaped"
-        checkpoint_like_prefixes = (
-            "current goal",
-            "current blocker",
-            "next step",
-            "current phase",
-            "key files",
-            "freshness",
-            "当前目标",
-            "当前卡点",
-            "下一步",
-            "当前阶段",
-            "关键文件",
-            "已完成",
-            "已排除",
-        )
-        if any(lowered.startswith(prefix) for prefix in checkpoint_like_prefixes):
-            return "transient_task_state"
-        if re.search(r"(?i)\b(stdout|stderr|traceback|exit_code)\b", text) or len(text) > 220:
-            return "noisy_output"
-        return ""
-
-    def extract_durable_promotions(self, user_message, final_answer):
-        user_text = str(user_message or "")
-        if not (DURABLE_MEMORY_INTENT_PATTERN.search(user_text) or DURABLE_MEMORY_INTENT_ZH_PATTERN.search(user_text)):
-            return [], []
-        promotions = []
-        rejections = []
-        for line in str(final_answer or "").splitlines():
-            text = line.strip()
-            if not text or REDACTED_VALUE in text:
-                continue
-            for topic, pattern in DURABLE_MEMORY_LINE_PATTERNS:
-                match = pattern.match(text)
-                if not match:
-                    continue
-                note_text = match.group(1).strip()
-                if note_text:
-                    reason = self.reject_durable_reason(note_text)
-                    if reason:
-                        rejections.append(f"{topic}:{reason}")
-                        break
-                    promotions.append((topic, note_text))
-                break
-        return promotions, rejections
-
-    def promote_durable_memory(self, user_message, final_answer):
-        promotions, rejections = self.extract_durable_promotions(user_message, final_answer)
-        promoted, superseded = self.memory.promote_durable(promotions)
-        self.session["memory"] = self.memory.to_dict()
-        self.last_durable_promotions = promoted
-        self.last_durable_rejections = rejections
-        self.last_durable_superseded = superseded
-        return promoted, rejections, superseded
 
     def ask(self, user_message, event_callback=None):
         """为同步调用方执行一条请求，并可订阅处理过程中的运行事件。"""
@@ -641,9 +583,6 @@ class Nano:
             "resume_status": task_state.resume_status,
             "task_state": task_state.to_dict(),
             "prompt_metadata": self.last_prompt_metadata,
-            "durable_promotions": list(self.last_durable_promotions),
-            "durable_rejections": list(self.last_durable_rejections),
-            "durable_superseded": list(self.last_durable_superseded),
             "redacted_env": self.detected_secret_env_summary(),
         }
 
@@ -684,8 +623,9 @@ class Nano:
         )
         # 委派的目标是“调查”，不是“放权执行”。
         # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
-        child.session["memory"]["task"] = task
-        child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
+        child.memory.set_task_summary(task)
+        child.memory.append_note(clip(self.history_text(), 300), source="parent_history")
+        child.session["memory"] = child.memory.to_dict()
         return "delegate_result:\n" + child.ask(task)
 
     def tool_list_files(self, args):

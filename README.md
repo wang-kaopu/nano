@@ -18,6 +18,7 @@
 - 模块入口是 `python -m nano`
 - 会话保存在 `.nano/sessions/`
 - 每次运行的工件保存在 `.nano/runs/<run_id>/`
+- 项目记忆保存在 `.nano/projects/<cwd-sha256 前 16 位>/memory/`，其中 `MEMORY.md` 是索引
 - 支持三类模型后端：
   - OpenAI 兼容 Responses API
   - Anthropic 兼容 Messages API
@@ -225,11 +226,17 @@ NANO_ANTHROPIC_MODEL="claude-sonnet-4-6"
 在 `nano>` 输入 `/` 会显示命令菜单；使用上下方向键选择，按回车确认。
 
 - `/help`：查看内置命令
-- `/memory`：查看提炼后的工作记忆
+- `/memory`：列出当前项目的持久文件记忆
 - `/session`：查看当前会话文件路径
 - `/resume`：弹出已保存会话列表，显示最新消息和更新时间；上下键选择，回车恢复，`Esc` 退出
 - `/reset`：清空当前会话状态
 - `/exit` 或 `/quit`：退出 REPL
+
+## 项目记忆
+
+持久记忆以独立 Markdown 文件保存在 `.nano/projects/<cwd-sha256 前 16 位>/memory/`。`MEMORY.md` 是自动维护的索引；其他文件以 `{type}_{slugified_name}.md` 命名，并使用 `name`、`description`、`type` 三个 YAML frontmatter 字段。可用类型为 `user`、`feedback`、`project` 和 `reference`。
+
+模型保存记忆时使用 `write_file` 直接写入该目录。每次请求会将文件名和描述交给同一模型的 side query 进行语义选择；完整正文只读取最多 5 条未在当前会话展示过的记忆。单文件最多 4KB，整场会话累计最多 60KB。
 
 ## 安全与持久化
 

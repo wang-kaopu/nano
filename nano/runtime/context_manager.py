@@ -11,7 +11,7 @@ from typing import Any
 
 SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
-RELEVANT_MEMORY_LIMIT = 3
+RELEVANT_MEMORY_LIMIT = 5
 
 
 class ContextManager:
@@ -31,11 +31,14 @@ class ContextManager:
         if checkpoint_text and include_prefix:
             prefix = prefix + "\n\n" + checkpoint_text
         memory = "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text())
-        selected_notes: list[dict[str, Any]] = []
+        selected_memories = []
         if memory_enabled and relevant_memory_enabled:
-            selected_notes = self.agent.memory.retrieval_candidates(user_message, limit=RELEVANT_MEMORY_LIMIT)
-        note_texts = [str(note.get("text", "")) for note in selected_notes if str(note.get("text", "")).strip()]
-        relevant_memory = "\n".join(["Relevant memory:", *[f"- {text}" for text in note_texts]]) if note_texts else "Relevant memory:\n- none"
+            selected_memories = self.agent.memory.select_relevant_memories(user_message, self.agent.side_query)
+        relevant_memory = (
+            "\n\n".join(["Relevant memories:", *[f"{memory.header}\n{memory.content}" for memory in selected_memories]])
+            if selected_memories
+            else "Relevant memories:\n- none"
+        )
         history = self._raw_history_text(self._model_history())
         current_request = f"Current user request:\n{user_message}"
         if not include_prefix:
@@ -50,7 +53,7 @@ class ContextManager:
             CURRENT_REQUEST_SECTION: current_request,
         }
         prompt = "\n\n".join(sections[section] for section in SECTION_ORDER if sections[section]).strip()
-        return prompt, self._metadata(prompt, sections, selected_notes, note_texts, user_message)
+        return prompt, self._metadata(prompt, sections, selected_memories, user_message)
 
     def _model_history(self) -> list[dict[str, Any]]:
         """优先返回流式循环维护的短对话窗口。"""
@@ -77,8 +80,7 @@ class ContextManager:
         self,
         prompt: str,
         sections: dict[str, str],
-        selected_notes: list[dict[str, Any]],
-        note_texts: list[str],
+        selected_memories: list[Any],
         user_message: str,
     ) -> dict[str, Any]:
         """生成不含预算决策的 prompt trace 元数据。"""
@@ -95,15 +97,12 @@ class ContextManager:
             "sections": section_metadata,
             "relevant_memory": {
                 "limit": RELEVANT_MEMORY_LIMIT,
-                "selected_count": len(selected_notes),
-                "selected_notes": [note["text"] for note in selected_notes],
-                "selected_sources": [str(note.get("source", "")).strip() for note in selected_notes],
-                "selected_kinds": [str(note.get("kind", "episodic")).strip() or "episodic" for note in selected_notes],
-                "selected_durable_count": sum(1 for note in selected_notes if (str(note.get("kind", "episodic")).strip() or "episodic") == "durable"),
+                "selected_count": len(selected_memories),
+                "selected_filenames": [memory.filename for memory in selected_memories],
+                "selected_paths": [str(memory.path) for memory in selected_memories],
                 "raw_chars": len(sections["relevant_memory"]),
                 "rendered_chars": len(sections["relevant_memory"]),
-                "rendered_notes": note_texts,
-                "rendered_count": len(note_texts),
+                "rendered_count": len(selected_memories),
             },
             "history": {
                 "raw_chars": len(sections["history"]),

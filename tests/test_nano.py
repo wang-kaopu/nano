@@ -72,7 +72,7 @@ def test_agent_runs_tool_then_final(tmp_path):
 
     assert answer == "Read the file successfully."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
-    assert "hello.txt" in agent.session["memory"]["files"]
+    assert "hello.txt" in agent.session["memory"]["working"]["recent_files"]
 
 
 def test_approval_denial_stops_before_the_model_can_try_an_alternative_command(tmp_path):
@@ -110,7 +110,7 @@ def test_agent_updates_task_summary_on_each_request(tmp_path):
     assert agent.session["memory"]["working"]["task_summary"] == "Second request"
 
 
-def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
+def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
     (tmp_path / "facts.txt").write_text("deploy key is red\n", encoding="utf-8")
     agent = build_agent(
         tmp_path,
@@ -137,8 +137,8 @@ def test_agent_only_stores_reusable_epistemic_notes(tmp_path):
 
     assert resumed.ask("What color is the deploy key?") == "It is red."
     prompt = resumed.model_client.prompts[-1]
-    assert "Relevant memory" in prompt
-    assert "deploy key is red" in prompt
+    assert "Relevant memories:\n- none" in prompt
+    assert any("deploy key is red" in note["text"] for note in resumed.memory.to_dict()["episodic_notes"])
 
 
 def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling(tmp_path):
@@ -1242,14 +1242,11 @@ def test_prompt_metadata_preserves_full_sections(tmp_path):
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
     metadata = prompt_events[0]["prompt_metadata"]
-    relevant_section = agent.model_client.prompts[0].split("Relevant memory:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    relevant_section = agent.model_client.prompts[0].split("Relevant memories:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
-    assert metadata["relevant_memory"]["selected_count"] == 3
-    assert len(metadata["relevant_memory"]["rendered_notes"]) == 3
-    assert len([line for line in relevant_section.splitlines() if line.startswith("- ")]) == 3
-    assert "alpha episodic" in relevant_section
-    assert "beta episodic" in relevant_section
-    assert "gamma episodic" in relevant_section
+    assert metadata["relevant_memory"]["selected_count"] == 0
+    assert metadata["relevant_memory"]["rendered_count"] == 0
+    assert relevant_section == "- none"
     assert metadata["current_request"]["text"] == "recall"
     assert metadata["current_request"]["rendered_chars"] == len("recall")
 
@@ -1657,129 +1654,22 @@ def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
     assert "README.md" in process_notes[-1]["tags"]
 
 
-def test_explicit_memory_promotion_persists_durable_memory_topics(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>Project convention: Use constrained tools instead of guessing.\n"
-            "Project convention: Preserve local agent state under .nano/.\n"
-            "Decision: Keep durable memory topic-based and lightweight.</final>",
-        ],
+def test_writing_a_memory_file_rebuilds_its_project_index(tmp_path):
+    agent = build_agent(tmp_path, [])
+    assert agent.memory.memory_dir is not None
+    memory_path = agent.memory.memory_dir / "feedback_concise-output.md"
+    relative_path = memory_path.relative_to(tmp_path).as_posix()
+
+    agent.run_tool(
+        "write_file",
+        {
+            "path": relative_path,
+            "content": "---\nname: Concise output\ndescription: Keep final responses direct.\ntype: feedback\n---\n\nDo not add an unnecessary summary.\n",
+        },
     )
 
-    answer = agent.ask(
-        "Capture the stable facts you already discovered as durable memory. "
-        "Respond with exactly the long-term facts."
-    )
-
-    assert "Project convention:" in answer
-
-    index_path = tmp_path / ".nano" / "memory" / "MEMORY.md"
-    conventions_path = tmp_path / ".nano" / "memory" / "topics" / "project-conventions.md"
-    decisions_path = tmp_path / ".nano" / "memory" / "topics" / "key-decisions.md"
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-
-    assert index_path.exists()
-    assert conventions_path.exists()
-    assert decisions_path.exists()
-    assert "project-conventions" in index_path.read_text(encoding="utf-8")
-    assert "Use constrained tools instead of guessing." in conventions_path.read_text(encoding="utf-8")
-    assert "Keep durable memory topic-based and lightweight." in decisions_path.read_text(encoding="utf-8")
-    assert report["durable_promotions"] == [
-        "project-conventions: Use constrained tools instead of guessing.",
-        "project-conventions: Preserve local agent state under .nano/.",
-        "key-decisions: Keep durable memory topic-based and lightweight.",
-    ]
-
-
-def test_explicit_memory_promotion_supports_chinese_intent_and_labels(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>项目约定：优先使用受约束工具，不要靠猜。\n"
-            "决策：持久记忆保持轻量、按 topic 管理。</final>",
-        ],
-    )
-
-    answer = agent.ask("请把下面这些稳定事实记住，作为长期记忆保存下来。")
-
-    assert "项目约定：" in answer
-
-    conventions_path = tmp_path / ".nano" / "memory" / "topics" / "project-conventions.md"
-    decisions_path = tmp_path / ".nano" / "memory" / "topics" / "key-decisions.md"
-
-    assert "优先使用受约束工具，不要靠猜。" in conventions_path.read_text(encoding="utf-8")
-    assert "持久记忆保持轻量、按 topic 管理。" in decisions_path.read_text(encoding="utf-8")
-
-
-def test_explicit_memory_promotion_rejects_secret_shaped_and_transient_lines(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>Project convention: Use constrained tools instead of guessing.\n"
-            "Dependency: API key is sk-live-secret-abc.\n"
-            "Decision: Current goal is fix flaky tests.\n"
-            "Dependency: stdout: FAIL test_one FAIL test_two FAIL test_three.</final>",
-        ],
-    )
-
-    agent.ask("Capture these stable facts into durable memory.")
-
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    conventions_path = tmp_path / ".nano" / "memory" / "topics" / "project-conventions.md"
-    dependency_path = tmp_path / ".nano" / "memory" / "topics" / "dependency-facts.md"
-
-    assert report["durable_promotions"] == [
-        "project-conventions: Use constrained tools instead of guessing.",
-    ]
-    assert report["durable_rejections"] == [
-        "dependency-facts:secret_shaped",
-        "key-decisions:transient_task_state",
-        "dependency-facts:noisy_output",
-    ]
-    assert "Use constrained tools instead of guessing." in conventions_path.read_text(encoding="utf-8")
-    assert not dependency_path.exists()
-
-
-def test_explicit_memory_promotion_supersedes_matching_durable_fact(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>Dependency: Python runtime is 3.11.</final>",
-            "<final>Dependency: Python runtime is 3.12.</final>",
-        ],
-    )
-
-    assert agent.ask("Capture this stable dependency fact into durable memory.") == "Dependency: Python runtime is 3.11."
-    assert agent.ask("Save the updated dependency fact into durable memory.") == "Dependency: Python runtime is 3.12."
-
-    dependency_path = tmp_path / ".nano" / "memory" / "topics" / "dependency-facts.md"
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    text = dependency_path.read_text(encoding="utf-8")
-
-    assert "Python runtime is 3.12." in text
-    assert "Python runtime is 3.11." not in text
-    assert report["durable_superseded"] == [
-        "dependency-facts: Python runtime is 3.11. -> Python runtime is 3.12.",
-    ]
-
-
-def test_explicit_memory_promotion_dedupes_duplicate_durable_note(tmp_path):
-    agent = build_agent(
-        tmp_path,
-        [
-            "<final>Project convention: Use constrained tools instead of guessing.</final>",
-            "<final>Project convention: Use constrained tools instead of guessing.</final>",
-        ],
-    )
-
-    agent.ask("Capture the stable fact into durable memory.")
-    agent.ask("Capture the stable fact into durable memory again.")
-
-    conventions_path = tmp_path / ".nano" / "memory" / "topics" / "project-conventions.md"
-    text = conventions_path.read_text(encoding="utf-8")
-
-    assert text.count("Use constrained tools instead of guessing.") == 1
+    index = (agent.memory.memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+    assert "**[Concise output](feedback_concise-output.md)** (feedback)" in index
 
 
 def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):

@@ -119,7 +119,6 @@ class QueryEngine:
         """持久化正常完成工件并返回最终答案。"""
         runtime = self.runtime
         task_state.finish_success(final)
-        runtime.promote_durable_memory(user_message, final)
         checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="run_finished")
         runtime.run_store.write_task_state(task_state)
         runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "run_finished"})
@@ -139,7 +138,6 @@ class QueryEngine:
     def _finish_stopped(self, task_state, user_message, final, run_started_at):
         """持久化停止或失败工件并返回可见的最终消息。"""
         runtime = self.runtime
-        runtime.promote_durable_memory(user_message, final)
         runtime.run_store.write_task_state(task_state)
         checkpoint = runtime.create_checkpoint(task_state, user_message, trigger=task_state.stop_reason or "run_stopped")
         runtime.emit_trace(

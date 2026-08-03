@@ -129,6 +129,7 @@ class FakeModelClient:
 
     def __init__(self, outputs: Iterable[str | list[str]]) -> None:
         self.model = "fake"
+        self.base_url = ""
         self.outputs = list(outputs)
         self.prompts = []
         self.supports_prompt_cache = False
