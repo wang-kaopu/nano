@@ -63,10 +63,6 @@ class QueryEngine:
                         checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
                         runtime.run_store.write_task_state(task_state)
                         runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "workspace_mismatch"})
-                    if prompt_metadata.get("budget_reductions"):
-                        checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="context_reduction")
-                        runtime.run_store.write_task_state(task_state)
-                        runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "context_reduction"})
                 elif event.type == "model_requested":
                     runtime.run_store.write_task_state(task_state)
                     runtime.emit_trace(task_state, "model_requested", event.payload)

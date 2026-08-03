@@ -18,7 +18,10 @@ Environment: TypeAlias = Mapping[str, str]
 class ModelClient(Protocol):
     """定义运行时可调用的统一模型客户端接口。"""
 
+    model: str
     supports_prompt_cache: bool
+    supports_native_tool_calls: bool
+    native_tool_call_protocol: str
     last_completion_metadata: JsonObject
 
     def complete(

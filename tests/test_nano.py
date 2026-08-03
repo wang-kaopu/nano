@@ -528,6 +528,8 @@ def test_openai_compatible_client_sends_prompt_cache_fields_and_records_usage():
     assert captured["body"]["prompt_cache_retention"] == "in_memory"
     assert client.last_completion_metadata["prompt_cache_supported"] is True
     assert client.last_completion_metadata["cached_tokens"] == 1536
+    assert client.last_completion_metadata["cache_read_tokens"] == 1536
+    assert client.last_completion_metadata["cache_creation_tokens"] == 0
     assert client.last_completion_metadata["cache_hit"] is True
     assert client.last_completion_metadata["input_tokens"] == 2048
 
@@ -600,8 +602,10 @@ def test_openai_compatible_client_sends_function_tools_and_emits_function_call()
 
 def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_path):
     class NativeToolClient:
+        model = "native-test"
         supports_native_tool_calls = True
         supports_prompt_cache = False
+        native_tool_call_protocol = "openai"
 
         def __init__(self):
             self.last_completion_metadata = {}
@@ -651,8 +655,10 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
 
 def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_writes(tmp_path):
     class NativeToolClient:
+        model = "native-test"
         supports_native_tool_calls = True
         supports_prompt_cache = False
+        native_tool_call_protocol = "openai"
 
         def __init__(self):
             self.last_completion_metadata = {}
@@ -721,7 +727,10 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
 
 def test_agent_interrupt_persists_user_interrupted_run(tmp_path):
     class InterruptingModelClient:
+        model = "interrupting-test"
         supports_prompt_cache = False
+        supports_native_tool_calls = False
+        native_tool_call_protocol = "openai"
 
         def __init__(self):
             self.last_completion_metadata = {}
@@ -1277,7 +1286,7 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
     assert "<redacted>" in tool_events[0]["result"]
 
 
-def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
+def test_prompt_metadata_preserves_full_sections(tmp_path):
     agent = build_agent(tmp_path, ["<final>Done.</final>"])
     agent.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
     agent.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
@@ -1291,14 +1300,6 @@ def test_prompt_budget_metadata_records_budget_decisions(tmp_path):
                 "created_at": f"2026-04-07T10:0{index}:00+00:00",
             }
         )
-
-    agent.context_manager.total_budget = 1000
-    agent.context_manager.section_budgets = {
-        "prefix": 80,
-        "memory": 80,
-        "relevant_memory": 80,
-        "history": 80,
-    }
 
     assert agent.ask("recall") == "Done."
 
@@ -1339,54 +1340,6 @@ def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
     assert third["prefix_changed"] is True
     assert third["workspace_changed"] is True
     assert "demo changed" in agent.prefix
-
-
-def test_agent_creates_checkpoint_when_context_reduction_happens_and_artifacts_only_reference_it(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done after checkpoint.</final>"])
-    for index in range(10):
-        agent.record(
-            {
-                "role": "user" if index % 2 == 0 else "assistant",
-                "content": f"history-{index}-" + ("A" * 260),
-                "created_at": f"2026-04-07T10:{index:02d}:00+00:00",
-            }
-        )
-    agent.memory.append_note("checkpoint note " + ("B" * 220), tags=("checkpoint",), created_at="2026-04-07T11:00:00+00:00")
-    agent.context_manager.total_budget = 900
-    agent.context_manager.section_budgets = {
-        "prefix": 120,
-        "memory": 120,
-        "relevant_memory": 120,
-        "history": 160,
-    }
-
-    assert agent.ask("Resume the long task") == "Done after checkpoint."
-
-    checkpoint_state = agent.session["checkpoints"]
-    checkpoint = checkpoint_state["items"][checkpoint_state["current_id"]]
-    assert checkpoint["checkpoint_id"] == checkpoint_state["current_id"]
-    assert checkpoint["schema_version"] == "phase1-v1"
-    assert checkpoint["current_goal"] == "Resume the long task"
-    assert checkpoint["key_files"] == []
-    assert checkpoint["current_blocker"] == ""
-    assert checkpoint["next_step"]
-
-    task_state = json.loads(agent.run_store.task_state_path(agent.current_task_state).read_text(encoding="utf-8"))
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
-    trace_events = [
-        json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
-    ]
-
-    assert task_state["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert report["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert report["task_state"]["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert "current_goal" not in task_state
-    assert "current_goal" not in report
-    checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
-    assert checkpoint_events
-    assert checkpoint_events[-1]["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert "current_goal" not in checkpoint_events[-1]
 
 
 def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
@@ -1926,7 +1879,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
     assert agent.last_prompt_metadata["prompt_cache_key"] == agent.last_prompt_metadata["prefix_hash"]
 
 
-def test_streaming_conversation_retains_recent_messages_only(tmp_path):
+def test_streaming_conversation_retains_messages_until_auto_compact(tmp_path):
     agent = build_agent(tmp_path, ["<final>Done.</final>"])
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
@@ -1943,7 +1896,7 @@ def test_streaming_conversation_retains_recent_messages_only(tmp_path):
     prompt = agent.model_client.prompts[-1]
 
     assert recent_text in prompt
-    assert old_text not in prompt
+    assert old_text in prompt
 
 
 def test_public_api_exports_resolve_through_package_path():

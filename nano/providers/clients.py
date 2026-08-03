@@ -6,6 +6,7 @@ runtime 只关心一件事：给我一个 prompt，我拿回一段文本。
 """
 
 import asyncio
+import copy
 import json
 import random
 import sys
@@ -35,16 +36,13 @@ class _ProviderHTTPError(RuntimeError):
 
 def is_retryable(error: Any) -> bool:
     """判断错误是否属于限流、临时不可用或可恢复网络故障。"""
-    status = getattr(error, "status", None) or getattr(error, "status_code", None)
+    status = error.status if isinstance(error, _ProviderHTTPError) else None
     if status in {429, 503, 529}:
-        return True
-    code = getattr(error, "code", None)
-    if code in {"ECONNRESET", "ETIMEDOUT"}:
         return True
     if isinstance(error, httpx.TimeoutException):
         return True
-    message = str(getattr(error, "message", error)).lower()
-    return "overloaded" in message
+    message = str(error).lower()
+    return "overloaded" in message or "econnreset" in message or "etimedout" in message
 
 
 def _retry_delay(attempt: int) -> float:
@@ -54,10 +52,9 @@ def _retry_delay(attempt: int) -> float:
 
 def _retry_reason(error: Any) -> str:
     """将可重试错误转换为终端可读的简短原因。"""
-    status = getattr(error, "status", None) or getattr(error, "status_code", None)
-    if status:
-        return f"HTTP {status}"
-    return str(getattr(error, "code", None) or "network error")
+    if isinstance(error, _ProviderHTTPError):
+        return f"HTTP {error.status}"
+    return str(error) or "network error"
 
 
 def _print_retry(attempt: int, max_retries: int, reason: str) -> None:
@@ -90,16 +87,15 @@ def _validate_json_response(body_text: str, model: type[Any]) -> JsonObject:
 
 
 def _response_text(response: Any) -> str:
-    """读取 HTTPX 响应文本，并保留测试替身的兼容读取方式。"""
-    text = getattr(response, "text", None)
-    if text is not None:
-        return text
+    """读取 HTTPX 响应文本或测试替身的响应字节。"""
+    if isinstance(response, httpx.Response):
+        return response.text
     return response.read().decode("utf-8")
 
 
 def _response_status_code(response: Any) -> int:
-    """返回响应状态码，缺少该属性的轻量测试替身视为成功。"""
-    return int(getattr(response, "status_code", 200))
+    """返回 HTTPX 响应状态码，测试替身默认视为成功。"""
+    return response.status_code if isinstance(response, httpx.Response) else 200
 
 
 def _request_with_retries(
@@ -133,16 +129,17 @@ class FakeModelClient:
     """为测试和基准提供可预测的模型客户端。"""
 
     def __init__(self, outputs: Iterable[str | list[str]]) -> None:
+        self.model = "fake"
         self.outputs = list(outputs)
         self.prompts = []
         self.supports_prompt_cache = False
+        self.supports_native_tool_calls = False
+        self.native_tool_call_protocol = "openai"
         self.last_completion_metadata = {}
 
     def complete(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> str | list[str]:
         """为同步调用方返回下一条预设的完整响应。"""
         self.prompts.append(prompt)
-        if not getattr(self, "last_completion_metadata", None):
-            self.last_completion_metadata = {}
         if not self.outputs:
             raise RuntimeError("fake model ran out of outputs")
         return self.outputs.pop(0)
@@ -163,6 +160,8 @@ class OllamaModelClient:
         self.model = model
         self.host = host.rstrip("/")
         self.temperature = temperature
+        self.supports_native_tool_calls = False
+        self.native_tool_call_protocol = "openai"
         self.top_p = top_p
         self.timeout = timeout
         self.supports_prompt_cache = False
@@ -348,8 +347,25 @@ def _extract_usage_cache_details(data: JsonObject) -> JsonObject:
         "output_tokens": output_tokens,
         "total_tokens": usage.get("total_tokens"),
         "cached_tokens": cached_tokens,
+        "cache_read_tokens": cached_tokens,
+        "cache_creation_tokens": 0,
         "cache_hit": cached_tokens > 0,
     }
+
+
+def _with_anthropic_cache_breakpoints(messages: list[JsonObject]) -> list[JsonObject]:
+    """为最后一个稳定 Anthropic 内容 block 加缓存断点，不修改原始消息。"""
+    prepared_messages = copy.deepcopy(messages)
+    for message in reversed(prepared_messages):
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if not isinstance(block, dict) or block.get("type") == "thinking":
+                continue
+            block["cache_control"] = {"type": "ephemeral"}
+            return prepared_messages
+    return prepared_messages
 
 
 class OpenAICompatibleModelClient:
@@ -365,6 +381,7 @@ class OpenAICompatibleModelClient:
         # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.supports_native_tool_calls = True
+        self.native_tool_call_protocol = "openai"
         self.last_completion_metadata = {}
 
     def complete(
@@ -385,7 +402,7 @@ class OpenAICompatibleModelClient:
 
         输入 / 输出：
         - 输入：完整 prompt、最大输出 token，以及可选的 prompt cache 参数
-        - 输出：模型最终文本；同时把 usage / cached_tokens 等元数据写进
+        - 输出：模型最终文本；同时把 usage / 缓存 token 元数据写进
           `self.last_completion_metadata`
 
         在 agent 链路里的位置：
@@ -415,8 +432,7 @@ class OpenAICompatibleModelClient:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
             payload["parallel_tool_calls"] = True
-        # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
-        # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
+        # runtime 传入会话级缓存键，让同一会话的连续请求复用缓存。
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
@@ -447,7 +463,7 @@ class OpenAICompatibleModelClient:
         if status_code >= 400:
             raise RuntimeError(f"OpenAI-compatible request failed with HTTP {status_code}: {_response_text(response)}")
         body_text = _response_text(response)
-        response_headers = getattr(response, "headers", {}) or {}
+        response_headers = response.headers if isinstance(response, httpx.Response) else {}
         content_type = response_headers.get("Content-Type", response_headers.get("content-type", ""))
 
         # 有些兼容后端返回普通 JSON，有些返回 SSE。
@@ -600,7 +616,7 @@ class AnthropicCompatibleModelClient:
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
-        self.supports_prompt_cache = False
+        self.supports_prompt_cache = True
         self.supports_native_tool_calls = True
         self.native_tool_call_protocol = "anthropic"
         self.last_completion_metadata = {}
@@ -613,20 +629,21 @@ class AnthropicCompatibleModelClient:
         prompt_cache_retention: str | None = None,
         tools: list[JsonObject] | None = None,
         input_items: list[JsonObject] | None = None,
+        system: list[JsonObject] | None = None,
     ) -> str:
         """请求一条非流式 Anthropic 兼容完成响应。"""
-        # 为了保持统一接口，runtime 仍然会传缓存参数进来；
-        # 这里只是显式丢弃，因为当前 Anthropic-compatible 路径没有接缓存复用。
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
         payload = {
             "model": self.model,
-            "messages": input_items or [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "messages": _with_anthropic_cache_breakpoints(input_items) if input_items else [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_new_tokens,
             "stream": False,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if system:
+            payload["system"] = system
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
@@ -676,18 +693,21 @@ class AnthropicCompatibleModelClient:
         prompt_cache_retention: str | None = None,
         tools: list[JsonObject] | None = None,
         input_items: list[JsonObject] | None = None,
+        system: list[JsonObject] | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """将 Anthropic Messages SSE 事件转换为标准化文本增量。"""
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
         payload: JsonObject = {
             "model": self.model,
-            "messages": input_items or [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
+            "messages": _with_anthropic_cache_breakpoints(input_items) if input_items else [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_new_tokens,
             "stream": True,
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        if system:
+            payload["system"] = system
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
@@ -713,7 +733,20 @@ class AnthropicCompatibleModelClient:
                                 continue
                             event = json.loads(body)
                             event_type = event.get("type", "")
-                            if event_type == "content_block_start":
+                            if event_type == "message_start":
+                                message = event.get("message") or {}
+                                usage = message.get("usage") or {} if isinstance(message, dict) else {}
+                                cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
+                                self.last_completion_metadata.update(
+                                    {
+                                        "input_tokens": usage.get("input_tokens"),
+                                        "cache_read_tokens": cache_read_tokens,
+                                        "cache_creation_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+                                        "cached_tokens": cache_read_tokens,
+                                        "cache_hit": cache_read_tokens > 0,
+                                    }
+                                )
+                            elif event_type == "content_block_start":
                                 index = int(event.get("index", -1))
                                 block = event.get("content_block") or {}
                                 if block.get("type") == "text":

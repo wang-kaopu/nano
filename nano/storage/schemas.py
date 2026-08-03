@@ -56,6 +56,7 @@ class SessionModel(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
     conversation: list[dict[str, Any]] = Field(default_factory=list)
     memory: dict[str, Any] = Field(default_factory=dict)
+    last_input_token_count: int = 0
     checkpoints: CheckpointStateModel = Field(default_factory=CheckpointStateModel)
     runtime_identity: dict[str, Any] = Field(default_factory=dict)
     resume_state: ResumeStateModel = Field(default_factory=ResumeStateModel)

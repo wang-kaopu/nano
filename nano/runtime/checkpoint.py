@@ -32,7 +32,7 @@ def current_runtime_identity(agent):
     return {
         "session_id": agent.session.get("id", ""),
         "cwd": str(agent.root),
-        "model": str(getattr(agent.model_client, "model", "")),
+        "model": agent.model_client.model,
         "model_client": agent.model_client.__class__.__name__,
         "approval_policy": agent.approval_policy,
         "read_only": bool(agent.read_only),
@@ -40,7 +40,7 @@ def current_runtime_identity(agent):
         "max_new_tokens": int(agent.max_new_tokens),
         "feature_flags": dict(agent.feature_flags),
         "shell_env_allowlist": list(agent.shell_env_allowlist),
-        "workspace_fingerprint": getattr(getattr(agent, "prefix_state", None), "workspace_fingerprint", agent.workspace.fingerprint()),
+        "workspace_fingerprint": agent.prefix_state.workspace_fingerprint,
         "tool_signature": agent.tool_signature(),
     }
 

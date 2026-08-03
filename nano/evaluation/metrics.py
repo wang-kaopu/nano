@@ -158,7 +158,7 @@ def aggregate_run_artifacts(runs_root):
 
 @contextmanager
 def _temporary_feature_flags(agent, updates):
-    previous = dict(getattr(agent, "feature_flags", {}))
+    previous = dict(agent.feature_flags)
     merged = dict(previous)
     merged.update(updates)
     agent.feature_flags = merged
@@ -305,7 +305,7 @@ def _run_memory_variant(mode):
             "correct": result.strip().lower() == "deploy key is red.",
             "tool_steps": int(task_state.tool_steps),
             "attempts": int(task_state.attempts),
-            "repeated_reads": int(getattr(model_client, "followup_reads", 0)),
+            "repeated_reads": int(model_client.followup_reads),
         }
 
 
@@ -401,7 +401,7 @@ def _run_memory_task_variant(task, variant):
             "correct": result.strip().lower() == f"{task['fact']}.",
             "tool_steps": int(task_state.tool_steps),
             "attempts": int(task_state.attempts),
-            "repeated_reads": int(getattr(agent.model_client, "followup_reads", 0)),
+            "repeated_reads": int(agent.model_client.followup_reads),
         }
 
 

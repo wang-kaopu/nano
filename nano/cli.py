@@ -206,7 +206,7 @@ def _effective_model(args, provider):
     # 1. 用户显式传入 --model
     # 2. provider 对应的环境变量
     # 3. 代码里的默认值
-    explicit_model = getattr(args, "model", None)
+    explicit_model = args.model
     if explicit_model:
         return explicit_model
     if provider == "openai":
@@ -241,12 +241,12 @@ def _configured_secret_names(args):
 
 
 def _build_model_client(args):
-    provider = getattr(args, "provider", "deepseek")
+    provider = args.provider
     # CLI 只负责把 provider 选择翻译成具体 client。
     # 真正的提示词格式、缓存支持、HTTP 协议差异，都封装在 models.py 里。
     if provider == "openai":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("NANO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL)
+        base_url = args.base_url or provider_env("NANO_OPENAI_API_BASE", ("OPENAI_API_BASE",), DEFAULT_OPENAI_BASE_URL)
         api_key = provider_env(
             "NANO_OPENAI_API_KEY",
             ("OPENAI_API_KEY", "NANO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "NANO_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
@@ -256,11 +256,11 @@ def _build_model_client(args):
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=args.openai_timeout,
         )
     if provider == "anthropic":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("NANO_ANTHROPIC_API_BASE", ("ANTHROPIC_API_BASE",), DEFAULT_ANTHROPIC_BASE_URL)
+        base_url = args.base_url or provider_env("NANO_ANTHROPIC_API_BASE", ("ANTHROPIC_API_BASE",), DEFAULT_ANTHROPIC_BASE_URL)
         api_key = provider_env(
             "NANO_ANTHROPIC_API_KEY",
             ("ANTHROPIC_API_KEY", "NANO_RIGHT_CODES_API_KEY", "RIGHT_CODES_API_KEY", "NANO_OPENAI_API_KEY", "OPENAI_API_KEY"),
@@ -270,22 +270,22 @@ def _build_model_client(args):
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=args.openai_timeout,
         )
     if provider == "deepseek":
         model = _effective_model(args, provider)
-        base_url = getattr(args, "base_url", None) or provider_env("NANO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), DEFAULT_DEEPSEEK_BASE_URL)
+        base_url = args.base_url or provider_env("NANO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), DEFAULT_DEEPSEEK_BASE_URL)
         api_key = provider_env("NANO_DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",))
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
             api_key=api_key,
             temperature=args.temperature,
-            timeout=getattr(args, "openai_timeout", getattr(args, "ollama_timeout", 300)),
+            timeout=args.openai_timeout,
         )
 
     model = _effective_model(args, provider)
-    host = getattr(args, "host", DEFAULT_OLLAMA_HOST)
+    host = args.host
     return OllamaModelClient(
         model=model,
         host=host,
@@ -425,8 +425,8 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     agent = build_agent(args)
 
-    model = getattr(agent.model_client, "model", getattr(args, "model", DEFAULT_OLLAMA_MODEL))
-    host = getattr(agent.model_client, "host", getattr(agent.model_client, "base_url", getattr(args, "host", DEFAULT_OLLAMA_HOST)))
+    model = agent.model_client.model
+    host = agent.model_client.host if isinstance(agent.model_client, OllamaModelClient) else agent.model_client.base_url
     print(build_welcome(agent, model=model, host=host))
 
     if args.prompt:

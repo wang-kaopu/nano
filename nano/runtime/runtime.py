@@ -36,9 +36,10 @@ DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", 
 DEFAULT_FEATURE_FLAGS = {
     "memory": True,
     "relevant_memory": True,
-    "context_reduction": True,
     "prompt_cache": True,
 }
+MODEL_CONTEXT_WINDOW = 1_000_000
+CONTEXT_WINDOW_RESERVE = 20_000
 DURABLE_MEMORY_INTENT_PATTERN = re.compile(r"(?i)\b(capture|remember|save|store|persist|note)\b")
 DURABLE_MEMORY_INTENT_ZH_PATTERN = re.compile(r"(记住|保存|记录|沉淀|长期记忆|持久记忆)")
 DURABLE_MEMORY_LINE_PATTERNS = (
@@ -84,6 +85,7 @@ class Nano:
         self.approval_policy = approval_policy
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
+        self.effective_window = MODEL_CONTEXT_WINDOW - CONTEXT_WINDOW_RESERVE
         self.depth = depth
         self.max_depth = max_depth
         self.read_only = read_only
@@ -118,6 +120,8 @@ class Nano:
         self.current_run_dir = None
         self._current_query_task = None
         self._active_tool_tasks = set()
+        self.last_input_token_count = int(self.session.get("last_input_token_count", 0))
+        self.last_api_call_time = 0.0
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
         self.last_durable_promotions = []
@@ -161,6 +165,7 @@ class Nano:
         resume_state = self.session.setdefault("resume_state", {})
         if not isinstance(resume_state, dict):
             self.session["resume_state"] = {}
+        self.session.setdefault("last_input_token_count", 0)
 
     def current_runtime_identity(self) -> JsonObject:
         return checkpointlib.current_runtime_identity(self)
@@ -224,7 +229,7 @@ class Nano:
         return build_prompt_prefix(
             workspace=self.workspace,
             tools=self.tools,
-            native_tool_calls=bool(getattr(self.model_client, "supports_native_tool_calls", False)),
+            native_tool_calls=self.model_client.supports_native_tool_calls,
         )
 
     def _apply_prefix_state(self, prefix_state: PromptPrefix) -> None:
@@ -232,8 +237,8 @@ class Nano:
         self.prefix = prefix_state.text
 
     def refresh_prefix(self, force: bool = False) -> dict[str, bool]:
-        previous_hash = getattr(getattr(self, "prefix_state", None), "hash", None)
-        previous_workspace_fingerprint = getattr(getattr(self, "prefix_state", None), "workspace_fingerprint", None)
+        previous_hash = self.prefix_state.hash
+        previous_workspace_fingerprint = self.prefix_state.workspace_fingerprint
 
         # 工作区事实相对稳定，所以这里按整体刷新；
         # 只有这些事实真的变化了，才重建完整 prefix。
@@ -295,11 +300,9 @@ class Nano:
         self.session_path = self.session_store.save(self.session)
 
     def record_conversation(self, item: dict[str, Any]) -> None:
-        """追加一条模型消息，并在第六条后仅保留最新三条。"""
+        """追加一条模型侧消息，供 autoCompact 在上下文接近上限时汇总。"""
         conversation = self.session.setdefault("conversation", [])
         conversation.append(item)
-        if len(conversation) >= 6:
-            del conversation[:-3]
         self.session_path = self.session_store.save(self.session)
 
     @staticmethod
@@ -334,10 +337,25 @@ class Nano:
         _, metadata = self._build_prompt_and_metadata(user_message)
         return metadata
 
-    def _build_prompt_and_metadata(self, user_message):
+    def anthropic_system_blocks(self) -> list[JsonObject]:
+        """构建 Anthropic 显式缓存的静态 system block 与未缓存动态尾巴。"""
+        blocks: list[JsonObject] = [{"type": "text", "text": self.prefix_state.static_system, "cache_control": {"type": "ephemeral"}}]
+        dynamic_text = self.prefix_state.dynamic_system
+        checkpoint_text = self.render_checkpoint_text().strip()
+        if checkpoint_text:
+            dynamic_text = dynamic_text + "\n\n" + checkpoint_text
+        if dynamic_text:
+            blocks.append({"type": "text", "text": dynamic_text})
+        return blocks
+
+    def anthropic_user_system_reminder(self) -> str:
+        """返回注入 Anthropic 首条 user 消息的项目级系统提醒。"""
+        return self.prefix_state.user_system_reminder
+
+    def _build_prompt_and_metadata(self, user_message, include_prefix: bool = True):
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
-        prompt, metadata = self.context_manager.build(user_message)
+        prompt, metadata = self.context_manager.build(user_message, include_prefix=include_prefix)
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
         # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
@@ -351,12 +369,12 @@ class Nano:
                 "workspace_docs": len(self.workspace.project_docs),
                 "recent_commits": len(self.workspace.recent_commits),
                 "prefix_hash": self.prefix_state.hash,
-                "prompt_cache_key": self.prefix_state.hash,
+                "prompt_cache_key": f"session:{self.session['id']}",
                 "workspace_fingerprint": self.prefix_state.workspace_fingerprint,
                 "tool_signature": self.prefix_state.tool_signature,
                 "workspace_changed": refresh["workspace_changed"],
                 "prefix_changed": refresh["prefix_changed"],
-                "prompt_cache_supported": bool(getattr(self.model_client, "supports_prompt_cache", False)),
+                "prompt_cache_supported": self.model_client.supports_prompt_cache,
                 "resume_status": self.resume_state.get("status", CHECKPOINT_NONE_STATUS),
                 "stale_summary_invalidations": int(self.resume_state.get("stale_summary_invalidations", 0)),
                 "stale_paths": list(self.resume_state.get("stale_paths", [])),

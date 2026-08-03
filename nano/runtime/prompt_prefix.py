@@ -13,6 +13,9 @@ class PromptPrefix:
     # prefix 除了文本本身，还带一小份元数据，
     # 这样 runtime 才能明确判断 prefix 是否可以复用。
     text: str
+    static_system: str
+    dynamic_system: str
+    user_system_reminder: str
     hash: str
     workspace_fingerprint: str
     tool_signature: str
@@ -42,9 +45,14 @@ def build_dynamic_system_context(workspace) -> str:
         (
             "You are operating in a local repository. Treat the following Git state and project instructions as authoritative context.",
             "Paths supplied to workspace tools are relative to the repository root unless the tool says otherwise.",
-            workspace.text(),
+            workspace.system_text(),
         )
     )
+
+
+def build_user_system_reminder(workspace) -> str:
+    """构建放入首条 user 消息的项目级系统提醒。"""
+    return workspace.user_system_reminder_text()
 
 
 def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False):
@@ -53,7 +61,6 @@ def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False
     # prefix 可以理解成 agent 的“工作手册”：
     # 它是谁、工具怎么调用、当前仓库是什么状态，都写在这里。
     identity = "# 1. Identity\nYou are nano, an interactive agent that helps with software engineering tasks using the tools available to you."
-    system = "# 2. System\n" + dynamic_system_context
     doing_tasks = textwrap.dedent(
         """\
         # 3. Doing Tasks
@@ -97,10 +104,15 @@ def build_prompt_prefix(workspace, tools, built_at=None, native_tool_calls=False
         - For completed work, report the changed files and verification in the fewest useful lines.
         """
     ).strip()
-    text = "\n\n".join((identity, system, doing_tasks, actions, using_tools, tone_and_style, output_efficiency))
+    static_system = "\n\n".join((identity, doing_tasks, actions, using_tools, tone_and_style, output_efficiency))
+    dynamic_system = "# 2. System\n" + dynamic_system_context
+    text = "\n\n".join((static_system, dynamic_system))
     signature = tool_signature(tools)
     return PromptPrefix(
         text=text,
+        static_system=static_system,
+        dynamic_system=dynamic_system,
+        user_system_reminder=build_user_system_reminder(workspace),
         hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         workspace_fingerprint=workspace.fingerprint(),
         tool_signature=signature,

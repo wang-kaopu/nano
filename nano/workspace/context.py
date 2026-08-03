@@ -160,6 +160,21 @@ class WorkspaceContext:
             )
         )
 
+    def system_text(self) -> str:
+        """渲染不含 AGENTS.md 的动态 system context。"""
+        agents_docs = {path: text for path, text in self.project_docs.items() if Path(path).name == "AGENTS.md"}
+        try:
+            self.project_docs = {path: text for path, text in self.project_docs.items() if path not in agents_docs}
+            return self.text()
+        finally:
+            self.project_docs.update(agents_docs)
+
+    def user_system_reminder_text(self) -> str:
+        """渲染需要随项目变化的 AGENTS.md 与当前日期提醒。"""
+        agents_docs = [f"{path}\n{text}" for path, text in self.project_docs.items() if Path(path).name == "AGENTS.md"]
+        date_text = __import__("datetime").date.today().isoformat()
+        return "\n\n".join((f"Current date: {date_text}", "Project instructions:\n" + "\n\n".join(agents_docs) if agents_docs else "Project instructions: - none"))
+
     def fingerprint(self) -> str:
         # 这个指纹用来判断仓库状态是否发生了足够大的变化，
         # 从而决定是否需要重建缓存中的 prompt prefix。
