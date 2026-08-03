@@ -25,6 +25,7 @@ STOP_REASON_APPROVAL_DENIED = "approval_denied"
 STOP_REASON_DELEGATE_FAILED = "delegate_failed"
 STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
+STOP_REASON_USER_INTERRUPTED = "user_interrupted"
 
 
 class TaskState(BaseModel):
@@ -89,6 +90,10 @@ class TaskState(BaseModel):
     def stop_model_error(self, final_answer: str = "") -> "TaskState":
         """标记模型调用失败。"""
         return self.stop(STOP_REASON_MODEL_ERROR, status=STATUS_FAILED, final_answer=final_answer)
+
+    def stop_user_interrupted(self, final_answer: str = "") -> "TaskState":
+        """标记当前请求由用户主动打断。"""
+        return self.stop(STOP_REASON_USER_INTERRUPTED, final_answer=final_answer)
 
     def finish_success(self, final_answer: str) -> "TaskState":
         """标记运行成功并保存最终答案。"""

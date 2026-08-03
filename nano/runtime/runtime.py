@@ -114,6 +114,8 @@ class Nano:
         self.session_path = self.session_store.save(self.session)
         self.current_task_state = None
         self.current_run_dir = None
+        self._current_query_task = None
+        self._active_tool_tasks = set()
         self.last_prompt_metadata = {}
         self.last_completion_metadata = {}
         self.last_durable_promotions = []
@@ -535,6 +537,14 @@ class Nano:
         from nano.runtime.agent_loop import QueryEngine
 
         return await QueryEngine(self).run_async(user_message)
+
+    def interrupt_current_request(self):
+        """请求取消当前正在运行的模型查询。"""
+        task = self._current_query_task
+        if task is None or task.done():
+            return False
+        task.cancel()
+        return True
 
     def execute_tool(self, name, args):
         result = self.tool_executor.execute(name, args)

@@ -7,9 +7,11 @@
 
 import argparse
 import os
+import signal
 import shutil
 import sys
 import textwrap
+import time
 
 from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
@@ -50,8 +52,12 @@ HELP_DETAILS = textwrap.dedent(
     /session Show the path to the saved session file.
     /reset   Clear the current session history and memory.
     /exit    Exit the agent.
+
+    While a request is running, press Ctrl-C twice within 2 seconds to interrupt it.
     """
 ).strip()
+
+INTERRUPT_CONFIRMATION_SECONDS = 2.0
 
 
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
@@ -63,6 +69,28 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://www.right.codes/claude/v1"
 DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-pro"
 DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
 SECRET_ENV_NAMES_VAR = "NANO_SECRET_ENV_NAMES"
+
+
+class _DoubleCtrlCInterruptHandler:
+    """要求连续两次 Ctrl-C 才取消当前请求，避免误触中断。"""
+
+    def __init__(self, agent, clock=time.monotonic) -> None:
+        """绑定当前 agent 和用于判定连续按键间隔的时钟。"""
+        self.agent = agent
+        self.clock = clock
+        self.first_interrupt_at = None
+
+    def __call__(self, signum, frame) -> None:
+        """处理 SIGINT：首次确认意图，第二次取消正在运行的请求。"""
+        del signum, frame
+        interrupt_at = self.clock()
+        if self.first_interrupt_at is not None and interrupt_at - self.first_interrupt_at <= INTERRUPT_CONFIRMATION_SECONDS:
+            if self.agent.interrupt_current_request():
+                print("\nInterrupting current request...", flush=True)
+            self.first_interrupt_at = None
+            return
+        self.first_interrupt_at = interrupt_at
+        print("\nPress Ctrl-C again within 2 seconds to interrupt the current request.", flush=True)
 
 
 def _effective_model(args, provider):
@@ -299,7 +327,12 @@ def main(argv=None):
         if prompt:
             print()
             try:
-                print(agent.ask(prompt))
+                previous_handler = signal.getsignal(signal.SIGINT)
+                signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
+                try:
+                    print(agent.ask(prompt))
+                finally:
+                    signal.signal(signal.SIGINT, previous_handler)
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
@@ -334,6 +367,11 @@ def main(argv=None):
 
         print()
         try:
-            print(agent.ask(user_input))
+            previous_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
+            try:
+                print(agent.ask(user_input))
+            finally:
+                signal.signal(signal.SIGINT, previous_handler)
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)

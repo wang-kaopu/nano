@@ -20,6 +20,7 @@ from nano import (
     build_welcome,
 )
 from nano.runtime.query_events import ModelStreamEvent
+from nano.runtime.task_state import STOP_REASON_USER_INTERRUPTED
 from nano.tools.tool_executor import ToolExecutionResult
 
 
@@ -719,6 +720,34 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
         assert client.executed_tools == ["list_files", "search", "write_file", "read_file"]
     finally:
         read_file.concurrency_safe = original_concurrency_safe
+
+
+def test_agent_interrupt_persists_user_interrupted_run(tmp_path):
+    class InterruptingModelClient:
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+
+        async def stream(self, prompt, max_new_tokens, **kwargs):
+            assert agent.interrupt_current_request() is True
+            await asyncio.sleep(0)
+            yield ModelStreamEvent("text_delta", text="This response must not finish.")
+            yield ModelStreamEvent("completed", metadata={})
+
+    workspace = build_workspace(tmp_path)
+    agent = Nano(
+        model_client=InterruptingModelClient(),
+        workspace=workspace,
+        session_store=SessionStore(tmp_path / ".nano" / "sessions"),
+        approval_policy="auto",
+    )
+
+    assert agent.ask("Stop this request") == "Interrupted by user."
+    assert agent.current_task_state.stop_reason == STOP_REASON_USER_INTERRUPTED
+    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    assert report["stop_reason"] == STOP_REASON_USER_INTERRUPTED
+    assert agent._current_query_task is None
 
 
 def test_openai_compatible_client_extracts_text_from_event_stream():

@@ -37,6 +37,7 @@ class QueryEngine:
         task_state.resume_status = runtime.resume_state.get("status", CHECKPOINT_NONE_STATUS)
         runtime.current_task_state = task_state
         runtime.current_run_dir = runtime.run_store.start_run(task_state)
+        runtime._current_query_task = asyncio.current_task()
         runtime.emit_trace(
             task_state,
             "run_started",
@@ -46,59 +47,70 @@ class QueryEngine:
             },
         )
 
-        async for event in QueryLoop(runtime, task_state, user_message).run():
-            if event.type == "prompt_built":
-                prompt_metadata = event.payload["prompt_metadata"]
-                runtime.emit_trace(task_state, "prompt_built", {"prompt_metadata": prompt_metadata})
-                if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
-                    checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
+        try:
+            async for event in QueryLoop(runtime, task_state, user_message).run():
+                if event.type == "prompt_built":
+                    prompt_metadata = event.payload["prompt_metadata"]
+                    runtime.emit_trace(task_state, "prompt_built", {"prompt_metadata": prompt_metadata})
+                    if prompt_metadata.get("resume_status") == CHECKPOINT_PARTIAL_STALE_STATUS:
+                        checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="freshness_mismatch")
+                        runtime.run_store.write_task_state(task_state)
+                        runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "freshness_mismatch"})
+                    elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
+                        runtime.emit_trace(task_state, "runtime_identity_mismatch", {"fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", []))})
+                        checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
+                        runtime.run_store.write_task_state(task_state)
+                        runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "workspace_mismatch"})
+                    if prompt_metadata.get("budget_reductions"):
+                        checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="context_reduction")
+                        runtime.run_store.write_task_state(task_state)
+                        runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "context_reduction"})
+                elif event.type == "model_requested":
                     runtime.run_store.write_task_state(task_state)
-                    runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "freshness_mismatch"})
-                elif prompt_metadata.get("resume_status") == CHECKPOINT_WORKSPACE_MISMATCH_STATUS:
-                    runtime.emit_trace(task_state, "runtime_identity_mismatch", {"fields": list(prompt_metadata.get("runtime_identity_mismatch_fields", []))})
-                    checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="workspace_mismatch")
+                    runtime.emit_trace(task_state, "model_requested", event.payload)
+                elif event.type == "tool_completed":
                     runtime.run_store.write_task_state(task_state)
-                    runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "workspace_mismatch"})
-                if prompt_metadata.get("budget_reductions"):
-                    checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="context_reduction")
+                    runtime.emit_trace(task_state, "tool_executed", event.payload)
+                    checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="tool_executed")
                     runtime.run_store.write_task_state(task_state)
-                    runtime.emit_trace(task_state, "checkpoint_created", {"checkpoint_id": checkpoint["checkpoint_id"], "trigger": "context_reduction"})
-            elif event.type == "model_requested":
-                runtime.run_store.write_task_state(task_state)
-                runtime.emit_trace(task_state, "model_requested", event.payload)
-            elif event.type == "tool_completed":
-                runtime.run_store.write_task_state(task_state)
-                runtime.emit_trace(task_state, "tool_executed", event.payload)
-                checkpoint = runtime.create_checkpoint(task_state, user_message, trigger="tool_executed")
-                runtime.run_store.write_task_state(task_state)
-                runtime.emit_trace(
-                    task_state,
-                    "checkpoint_created",
-                    {
-                        "checkpoint_id": checkpoint["checkpoint_id"],
-                        "trigger": "tool_executed",
-                    },
-                )
-            elif event.type == "retry":
-                runtime.run_store.write_task_state(task_state)
-            elif event.type == "final":
-                final = event.payload["answer"]
-                runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
-                return self._finish_success(task_state, user_message, final, run_started_at)
-            elif event.type == "error":
-                final = event.payload["message"]
-                task_state.stop_model_error(final)
-                runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                return self._finish_stopped(task_state, user_message, final, run_started_at)
-            elif event.type == "stopped":
-                if event.payload["reason"] == "retry_limit_reached":
-                    final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-                    task_state.stop_retry_limit(final)
-                else:
-                    final = "Stopped after reaching the step limit without a final answer."
-                    task_state.stop_step_limit(final)
-                runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                return self._finish_stopped(task_state, user_message, final, run_started_at)
+                    runtime.emit_trace(
+                        task_state,
+                        "checkpoint_created",
+                        {
+                            "checkpoint_id": checkpoint["checkpoint_id"],
+                            "trigger": "tool_executed",
+                        },
+                    )
+                elif event.type == "retry":
+                    runtime.run_store.write_task_state(task_state)
+                elif event.type == "final":
+                    final = event.payload["answer"]
+                    runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
+                    return self._finish_success(task_state, user_message, final, run_started_at)
+                elif event.type == "error":
+                    final = event.payload["message"]
+                    task_state.stop_model_error(final)
+                    runtime.record({"role": "assistant", "content": final, "created_at": now()})
+                    return self._finish_stopped(task_state, user_message, final, run_started_at)
+                elif event.type == "stopped":
+                    if event.payload["reason"] == "retry_limit_reached":
+                        final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+                        task_state.stop_retry_limit(final)
+                    else:
+                        final = "Stopped after reaching the step limit without a final answer."
+                        task_state.stop_step_limit(final)
+                    runtime.record({"role": "assistant", "content": final, "created_at": now()})
+                    return self._finish_stopped(task_state, user_message, final, run_started_at)
+        except asyncio.CancelledError:
+            active_tool_tasks = list(runtime._active_tool_tasks)
+            if active_tool_tasks:
+                await asyncio.shield(asyncio.gather(*active_tool_tasks, return_exceptions=True))
+            final = "Interrupted by user."
+            task_state.stop_user_interrupted(final)
+            runtime.record({"role": "assistant", "content": final, "created_at": now()})
+            return self._finish_stopped(task_state, user_message, final, run_started_at)
+        finally:
+            runtime._current_query_task = None
 
         raise RuntimeError("QueryLoop ended without a final event")
 

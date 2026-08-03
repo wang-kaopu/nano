@@ -124,6 +124,8 @@ class QueryLoop:
                     if concurrency_safe:
                         # 标记为并发安全的工具在参数完整后即可与剩余 SSE 响应抢跑执行。
                         tool_task = asyncio.create_task(self.runtime.tool_executor.execute_async(name, args))
+                        self.runtime._active_tool_tasks.add(tool_task)
+                        tool_task.add_done_callback(self.runtime._active_tool_tasks.discard)
                         tool_calls.append((tool_payload, tool_task))
                         yield QueryEvent("tool_started", {"name": name, "args": args})
                     else:
@@ -142,7 +144,7 @@ class QueryLoop:
                     if isinstance(response_output, list):
                         native_input.extend(response_output)
                 concurrent_tool_tasks = [task for _, task in tool_calls if task is not None]
-                concurrent_results = await asyncio.gather(*concurrent_tool_tasks) if concurrent_tool_tasks else []
+                concurrent_results = await asyncio.shield(asyncio.gather(*concurrent_tool_tasks)) if concurrent_tool_tasks else []
                 concurrent_result_index = 0
                 anthropic_tool_results: list[dict[str, str]] = []
                 for tool_payload, tool_task in tool_calls:
@@ -153,8 +155,10 @@ class QueryLoop:
                         concurrent_result_index += 1
                     else:
                         tool_task = asyncio.create_task(self.runtime.tool_executor.execute_async(name, args))
+                        self.runtime._active_tool_tasks.add(tool_task)
+                        tool_task.add_done_callback(self.runtime._active_tool_tasks.discard)
                         yield QueryEvent("tool_started", {"name": name, "args": args})
-                        tool_result = await tool_task
+                        tool_result = await asyncio.shield(tool_task)
                     self.task_state.record_tool(name)
                     result = tool_result.content
                     self.runtime.record(

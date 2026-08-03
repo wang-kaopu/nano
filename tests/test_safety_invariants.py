@@ -54,6 +54,28 @@ def test_risky_tool_deny_behavior(tmp_path):
     assert result == "error: approval denied for run_shell"
 
 
+def test_double_ctrl_c_handler_requires_two_presses(capsys):
+    class InterruptibleAgent:
+        def __init__(self):
+            self.interrupts = 0
+
+        def interrupt_current_request(self):
+            self.interrupts += 1
+            return True
+
+    times = iter([10.0, 11.5])
+    agent = InterruptibleAgent()
+    handler = nano_cli._DoubleCtrlCInterruptHandler(agent, clock=lambda: next(times))
+
+    handler(None, None)
+    assert agent.interrupts == 0
+    assert "Press Ctrl-C again" in capsys.readouterr().out
+
+    handler(None, None)
+    assert agent.interrupts == 1
+    assert "Interrupting current request" in capsys.readouterr().out
+
+
 def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
     class DummyModelClient:
         def __init__(self, *args, **kwargs):
