@@ -188,6 +188,8 @@ class ToolExecutor:
                 parent_message,
             )
             content, result_artifact_path = self._render_result_content(tool, result.content)
+            if not content.strip():
+                content = "(no output)"
             after_snapshot = agent.capture_workspace_snapshot() if not tool.is_read_only(input_value) else before_snapshot
             affected_paths, diff_summary = agent.diff_workspace_snapshots(before_snapshot, after_snapshot)
             workspace_changed = bool(affected_paths)

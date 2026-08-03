@@ -386,9 +386,9 @@ def tool_run_shell(context: ToolContext, args: ToolArgumentsPayload) -> str:
         f"""\
         exit_code: {result.returncode}
         stdout:
-        {result.stdout.strip() or "(empty)"}
+        {result.stdout.strip() or "(no output)"}
         stderr:
-        {result.stderr.strip() or "(empty)"}
+        {result.stderr.strip() or "(no output)"}
         """
     ).strip()
 
