@@ -35,3 +35,13 @@ def test_nano_ask_delegates_to_query_engine(tmp_path):
     agent = build_agent(tmp_path, ["<final>Facade works.</final>"])
 
     assert agent.ask("Use facade") == "Facade works."
+
+
+def test_query_engine_forwards_text_deltas_to_event_callback(tmp_path):
+    agent = build_agent(tmp_path, [["<final>", "Streamed ", "answer.</final>"]])
+    events = []
+
+    answer = QueryEngine(agent).run("Respond in chunks", event_callback=events.append)
+
+    assert answer == "Streamed answer."
+    assert [event.payload["text"] for event in events if event.type == "text_delta"] == ["<final>", "Streamed ", "answer.</final>"]

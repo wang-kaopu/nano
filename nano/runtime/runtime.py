@@ -526,17 +526,17 @@ class Nano:
         self.last_durable_superseded = superseded
         return promoted, rejections, superseded
 
-    def ask(self, user_message):
-        """为面向终端的同步公共接口执行一条请求。"""
+    def ask(self, user_message, event_callback=None):
+        """为同步调用方执行一条请求，并可订阅处理过程中的运行事件。"""
         from nano.runtime.agent_loop import QueryEngine
 
-        return QueryEngine(self).run(user_message)
+        return QueryEngine(self).run(user_message, event_callback=event_callback)
 
-    async def ask_async(self, user_message):
-        """异步执行一条请求并返回最终答案。"""
+    async def ask_async(self, user_message, event_callback=None):
+        """异步执行一条请求、返回最终答案，并可订阅处理过程中的运行事件。"""
         from nano.runtime.agent_loop import QueryEngine
 
-        return await QueryEngine(self).run_async(user_message)
+        return await QueryEngine(self).run_async(user_message, event_callback=event_callback)
 
     def interrupt_current_request(self):
         """请求取消当前正在运行的模型查询。"""

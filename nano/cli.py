@@ -24,6 +24,7 @@ from prompt_toolkit.widgets import Dialog, Label, RadioList
 
 from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import Nano
 from nano.storage.session_store import SessionStore
 from nano.utils import middle
@@ -98,6 +99,86 @@ class _DoubleCtrlCInterruptHandler:
             return
         self.first_interrupt_at = interrupt_at
         print("\nPress Ctrl-C again within 2 seconds to interrupt the current request.", flush=True)
+
+
+class _LiveResponsePrinter:
+    """将模型文本增量实时写入终端，并过滤协议标签和工具调用。"""
+
+    def __init__(self) -> None:
+        """初始化当前模型回合的增量缓冲状态。"""
+        self._mode = "undecided"
+        self._pending = ""
+        self.has_output = False
+
+    def __call__(self, event: QueryEvent) -> None:
+        """消费查询事件并在文本增量到达时输出用户可见内容。"""
+        if event.type == "model_requested":
+            self._mode = "undecided"
+            self._pending = ""
+            return
+        if event.type == "text_delta":
+            self._consume(str(event.payload.get("text", "")))
+            return
+        if event.type == "final" and self._mode == "final":
+            self._write(self._pending)
+            self._pending = ""
+
+    def _consume(self, text: str) -> None:
+        """识别当前增量所属的协议类型，并输出可安全展示的文本。"""
+        self._pending += text
+        if self._mode == "undecided":
+            if self._pending.startswith("<final>"):
+                self._mode = "final"
+                self._pending = self._pending[len("<final>"):]
+            elif self._pending.startswith("<tool"):
+                self._mode = "tool"
+                self._pending = ""
+            elif "<final>".startswith(self._pending) or "<tool".startswith(self._pending):
+                return
+            else:
+                self._mode = "text"
+        if self._mode == "final":
+            self._write_final_text()
+        elif self._mode == "text":
+            self._write(self._pending)
+            self._pending = ""
+
+    def _write_final_text(self) -> None:
+        """输出最终回答正文，同时保留可能被拆分的结束标签。"""
+        closing_tag = "</final>"
+        closing_index = self._pending.find(closing_tag)
+        if closing_index >= 0:
+            self._write(self._pending[:closing_index])
+            self._pending = ""
+            return
+        keep_length = 0
+        for length in range(1, min(len(self._pending), len(closing_tag) - 1) + 1):
+            if self._pending.endswith(closing_tag[:length]):
+                keep_length = length
+        if keep_length:
+            self._write(self._pending[:-keep_length])
+            self._pending = self._pending[-keep_length:]
+            return
+        self._write(self._pending)
+        self._pending = ""
+
+    def _write(self, text: str) -> None:
+        """立即写入非空文本，确保终端在流尚未结束时刷新。"""
+        if not text:
+            return
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        self.has_output = True
+
+
+def _print_streamed_response(agent, user_message: str) -> None:
+    """执行请求并实时打印模型回答，流结束后补齐终端换行。"""
+    printer = _LiveResponsePrinter()
+    answer = agent.ask(user_message, event_callback=printer)
+    if printer.has_output:
+        print()
+        return
+    print(answer)
 
 
 SLASH_COMMAND_KEY_BINDINGS = KeyBindings()
@@ -357,7 +438,7 @@ def main(argv=None):
                 previous_handler = signal.getsignal(signal.SIGINT)
                 signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
                 try:
-                    print(agent.ask(prompt))
+                    _print_streamed_response(agent, prompt)
                 finally:
                     signal.signal(signal.SIGINT, previous_handler)
             except RuntimeError as exc:
@@ -452,7 +533,7 @@ def main(argv=None):
             previous_handler = signal.getsignal(signal.SIGINT)
             signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
             try:
-                print(agent.ask(user_input))
+                _print_streamed_response(agent, user_input)
             finally:
                 signal.signal(signal.SIGINT, previous_handler)
         except RuntimeError as exc:

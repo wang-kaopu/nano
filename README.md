@@ -23,7 +23,7 @@
   - OpenAI 兼容 Responses API
   - Anthropic 兼容 Messages API
   - DeepSeek Anthropic 兼容 API
-- 模型响应使用异步流式处理；`list_files`、`read_file`、`search` 的完整调用会在响应结束前并行抢跑，其余工具在同一轮流结束后按顺序执行
+- CLI 会实时打印模型响应正文；模型响应使用异步流式处理，`list_files`、`read_file`、`search` 的完整调用会在响应结束前并行抢跑，其余工具在同一轮流结束后按顺序执行
 - 模型上下文保留最新消息；达到 6 条后只保留最近 3 条，完整运行过程仍写入 run trace
 
 ## 使用截图

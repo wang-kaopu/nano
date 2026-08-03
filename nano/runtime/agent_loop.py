@@ -16,17 +16,17 @@ class QueryEngine:
         """绑定持有会话和运行工件的运行时。"""
         self.runtime = runtime
 
-    def run(self, user_message):
-        """供未持有事件循环的同步调用方执行一条查询。"""
+    def run(self, user_message, event_callback=None):
+        """供未持有事件循环的同步调用方执行一条查询，并可接收运行事件。"""
         try:
             # 检查当前线程是否已运行 asyncio 事件循环。没有事件循环时会抛出 RuntimeError。
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.run_async(user_message))
+            return asyncio.run(self.run_async(user_message, event_callback=event_callback))
         raise RuntimeError("Nano.ask() cannot run inside an event loop; await Nano.ask_async() instead")
 
-    async def run_async(self, user_message):
-        """执行一条用户请求，并围绕内层 QueryLoop 持久化结果。"""
+    async def run_async(self, user_message, event_callback=None):
+        """执行一条用户请求、持久化运行工件，并可接收运行事件。"""
         runtime = self.runtime
         run_started_at = time.monotonic()
         runtime.memory.set_task_summary(user_message)
@@ -49,6 +49,8 @@ class QueryEngine:
 
         try:
             async for event in QueryLoop(runtime, task_state, user_message).run():
+                if event_callback is not None:
+                    event_callback(event)
                 if event.type == "prompt_built":
                     prompt_metadata = event.payload["prompt_metadata"]
                     runtime.emit_trace(task_state, "prompt_built", {"prompt_metadata": prompt_metadata})
