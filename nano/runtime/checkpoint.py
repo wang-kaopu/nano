@@ -23,7 +23,6 @@ RUNTIME_IDENTITY_KEYS = (
     "max_new_tokens",
     "feature_flags",
     "shell_env_allowlist",
-    "workspace_fingerprint",
     "tool_signature",
 )
 
