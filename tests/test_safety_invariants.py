@@ -48,7 +48,7 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
 
 def test_safe_shell_command_does_not_require_approval(tmp_path):
     (tmp_path / "permissions.json").write_text(
-        '{"permissions":{"allow":["run_shell(echo*)"],"deny":[]}}',
+        '{"permissions":{"tools":{"allow":[],"deny":[]},"shell":{"allow":["echo*"],"deny":[]}}}',
         encoding="utf-8",
     )
     agent = build_agent(tmp_path, [], approval_policy="never")
@@ -61,7 +61,7 @@ def test_safe_shell_command_does_not_require_approval(tmp_path):
 def test_project_allowed_write_file_does_not_require_approval(tmp_path):
     """项目显式放行写文件后，--approval never 不应阻断该操作。"""
     (tmp_path / "permissions.json").write_text(
-        '{"permissions":{"allow":["write_file"],"deny":[]}}',
+        '{"permissions":{"tools":{"allow":["write_file"],"deny":[]},"shell":{"allow":[],"deny":[]}}}',
         encoding="utf-8",
     )
     agent = build_agent(tmp_path, [], approval_policy="never")
@@ -83,7 +83,7 @@ def test_dangerous_shell_command_requires_approval(tmp_path):
 def test_project_deny_rule_blocks_shell_command_even_when_approval_is_automatic(tmp_path):
     """项目 deny 是硬拒绝，不能被 --approval auto 覆盖。"""
     (tmp_path / "permissions.json").write_text(
-        '{"permissions":{"allow":["run_shell"],"deny":["run_shell(git rm*)"]}}',
+        '{"permissions":{"tools":{"allow":[],"deny":[]},"shell":{"allow":["*"],"deny":["git rm*"]}}}',
         encoding="utf-8",
     )
     agent = build_agent(tmp_path, [], approval_policy="auto")
