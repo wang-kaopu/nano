@@ -1,5 +1,5 @@
 from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
-from nano.tool_executor import ToolExecutor, ToolExecutionResult
+from nano.tools.tool_executor import ToolExecutor, ToolExecutionResult
 
 
 def build_agent(tmp_path):

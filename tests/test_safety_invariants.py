@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
 from nano import cli as nano_cli
-from nano.task_state import TaskState
+from nano.runtime.task_state import TaskState
 
 
 def build_workspace(tmp_path):
@@ -159,7 +159,7 @@ def test_run_shell_uses_allowlisted_environment_only(tmp_path):
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     agent = build_agent(tmp_path, [], approval_policy="auto")
 
-    with patch("nano.tools.subprocess.run") as fake_run:
+    with patch("nano.tools.tools.subprocess.run") as fake_run:
         fake_run.return_value = type(
             "Result",
             (),
@@ -169,9 +169,9 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
 
     assert "toolkit-shell" in shell_result
     fake_run.assert_called_once()
-    assert agent.tool_run_shell.__func__.__module__ == "nano.runtime"
+    assert agent.tool_run_shell.__func__.__module__ == "nano.runtime.runtime"
 
-    with patch("nano.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
+    with patch("nano.tools.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
         delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
 
     assert delegate_result == "toolkit-delegate"

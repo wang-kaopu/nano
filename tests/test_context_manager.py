@@ -1,5 +1,5 @@
 from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
-from nano.context_manager import ContextManager
+from nano.runtime.context_manager import ContextManager
 
 
 def build_workspace(tmp_path):

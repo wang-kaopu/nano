@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any
 
-from .schemas import SessionModel
+from nano.storage.schemas import SessionModel
 
 
 class SessionStore:

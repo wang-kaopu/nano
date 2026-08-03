@@ -14,21 +14,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from . import checkpoint as checkpointlib
-from .features import memory as memorylib
-from . import security as securitylib
-from .context_manager import ContextManager
-from .checkpoint import CHECKPOINT_NONE_STATUS
-from .prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
-from .run_store import RunStore
-from .security import REDACTED_VALUE
-from .session_store import SessionStore
-from .tool import Tool, ToolProgressData
-from .tool_context import ToolContext
-from .tool_executor import ToolExecutor
-from .types import JsonObject, ModelClient
-from . import tools as toolkit
-from .workspace import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext, clip, now
+import nano.runtime.checkpoint as checkpointlib
+import nano.tools.security as securitylib
+import nano.tools.tools as toolkit
+from nano.memory import memory as memorylib
+from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS
+from nano.runtime.context_manager import ContextManager
+from nano.runtime.prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
+from nano.storage.run_store import RunStore
+from nano.storage.session_store import SessionStore
+from nano.tools.security import REDACTED_VALUE
+from nano.tools.tool import Tool, ToolProgressData
+from nano.tools.tool_context import ToolContext
+from nano.tools.tool_executor import ToolExecutor
+from nano.types import JsonObject, ModelClient
+from nano.utils import clip, now
+from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
 
 DEFAULT_SHELL_ENV_ALLOWLIST = ("HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "PATH", "PWD", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "USER")
 DEFAULT_FEATURE_FLAGS = {
@@ -525,13 +526,13 @@ class Nano:
 
     def ask(self, user_message):
         """为面向终端的同步公共接口执行一条请求。"""
-        from .agent_loop import QueryEngine
+        from nano.runtime.agent_loop import QueryEngine
 
         return QueryEngine(self).run(user_message)
 
     async def ask_async(self, user_message):
         """异步执行一条请求并返回最终答案。"""
-        from .agent_loop import QueryEngine
+        from nano.runtime.agent_loop import QueryEngine
 
         return await QueryEngine(self).run_async(user_message)
 

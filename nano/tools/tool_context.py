@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
 
-from .types import Environment, ToolArguments
+from nano.types import Environment, ToolArguments
 
 
 @dataclass

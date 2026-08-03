@@ -11,10 +11,12 @@ import shutil
 import sys
 import textwrap
 
-from .config import load_project_env, provider_env
-from .providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
-from .runtime import Nano, SessionStore
-from .workspace import WorkspaceContext, middle
+from nano.config import load_project_env, provider_env
+from nano.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from nano.runtime.runtime import Nano
+from nano.storage.session_store import SessionStore
+from nano.utils import middle
+from nano.workspace.context import WorkspaceContext
 
 DEFAULT_SECRET_ENV_NAMES = (
     "NANO_OPENAI_API_KEY",

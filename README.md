@@ -264,4 +264,4 @@ uv run pytest tests -q
 uv run ruff check nano tests scripts
 ```
 
-内部代码现在按较轻的边界拆分：`nano/evaluation/` 放 benchmark 和 metrics，`nano/providers/` 放模型 provider client，`nano/features/` 放可选运行时能力。新代码应直接使用这些包路径；旧的 `nano.evaluator`、`nano.metrics`、`nano.models` 和 `nano.memory` import 不再作为公共入口保留。
+内部代码按职责边界拆分：`nano/runtime/` 管理请求执行与恢复，`nano/tools/` 管理工具与安全边界，`nano/storage/` 管理持久化，`nano/workspace/` 管理仓库快照，`nano/memory/` 管理工作记忆与长期记忆，`nano/evaluation/` 保留 benchmark 与 metrics，`nano/providers/` 管理模型 provider client。新代码应直接使用这些包路径。

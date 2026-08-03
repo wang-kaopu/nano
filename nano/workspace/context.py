@@ -5,12 +5,13 @@
 """
 
 import subprocess
-import textwrap
 import hashlib
 import json
-from datetime import datetime, timezone
+import textwrap
 from pathlib import Path
 from typing import Sequence
+
+from nano.utils import clip
 
 MAX_TOOL_OUTPUT = 5000
 MAX_HISTORY = 12000
@@ -18,30 +19,6 @@ MAX_HISTORY = 12000
 # 我们不会预加载整个仓库，只会先给模型一小份“导航包”。
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
 IGNORED_PATH_NAMES = {".git", ".nano", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
-
-
-def now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def clip(text: object, limit: int = MAX_TOOL_OUTPUT) -> str:
-    """保留过长文本的首尾内容，避免丢失工具输出结论。"""
-    text = str(text)
-    if len(text) < limit:
-        return text
-    preserved = (limit - 60) // 2
-    return text[:preserved] + "(...)" + text[-preserved:]
-
-
-def middle(text: object, limit: int) -> str:
-    text = str(text).replace("\n", " ")
-    if len(text) <= limit:
-        return text
-    if limit <= 3:
-        return text[:limit]
-    left = (limit - 3) // 2
-    right = limit - 3 - left
-    return text[:left] + "..." + text[-right:]
 
 
 class WorkspaceContext:

@@ -8,7 +8,7 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
-from .workspace import MAX_TOOL_OUTPUT
+from nano.workspace.context import MAX_TOOL_OUTPUT
 
 
 class ToolProgressData(BaseModel):

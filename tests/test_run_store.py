@@ -1,7 +1,7 @@
 import json
 
-from nano.run_store import RunStore
-from nano.task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState
+from nano.storage.run_store import RunStore
+from nano.runtime.task_state import STOP_REASON_FINAL_ANSWER_RETURNED, TaskState
 
 
 def test_run_store_creates_run_directory_and_state_file(tmp_path):

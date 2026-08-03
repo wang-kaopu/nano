@@ -1,5 +1,5 @@
 from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
-from nano.agent_loop import QueryEngine
+from nano.runtime.agent_loop import QueryEngine
 
 
 def build_agent(tmp_path, outputs):

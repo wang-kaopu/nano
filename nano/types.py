@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
 
 if TYPE_CHECKING:
-    from .query_events import ModelStreamEvent
+    from nano.runtime.query_events import ModelStreamEvent
 
 JsonValue: TypeAlias = Any
 JsonObject: TypeAlias = dict[str, JsonValue]

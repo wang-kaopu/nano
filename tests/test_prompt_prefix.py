@@ -1,6 +1,6 @@
-from nano.prompt_prefix import build_prompt_prefix, tool_signature
-from nano.tools import build_tool_registry
-from nano.workspace import WorkspaceContext
+from nano.runtime.prompt_prefix import build_prompt_prefix, tool_signature
+from nano.tools.tools import build_tool_registry
+from nano.workspace.context import WorkspaceContext
 
 
 class _Agent:

@@ -12,9 +12,9 @@ from typing import Any
 
 import httpx
 
-from ..query_events import ModelStreamEvent
-from ..schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
-from ..types import JsonObject
+from nano.runtime.query_events import ModelStreamEvent
+from nano.storage.schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
+from nano.types import JsonObject
 
 OPENAI_COMPATIBLE_USER_AGENT = "nano/0.1"
 

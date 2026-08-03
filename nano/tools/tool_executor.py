@@ -7,9 +7,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .workspace import clip
-from .tools import tool_definition
-from .types import JsonObject, ToolArguments
+from nano.tools.tools import tool_definition
+from nano.types import JsonObject, ToolArguments
+from nano.utils import clip
 
 
 class ToolExecutionMetadata(BaseModel):

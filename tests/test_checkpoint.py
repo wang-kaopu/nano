@@ -1,5 +1,5 @@
 from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
-from nano.checkpoint import (
+from nano.runtime.checkpoint import (
     CHECKPOINT_FULL_VALID_STATUS,
     CHECKPOINT_NONE_STATUS,
     CHECKPOINT_SCHEMA_MISMATCH_STATUS,

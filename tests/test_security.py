@@ -1,4 +1,4 @@
-from nano.security import (
+from nano.tools.security import (
     REDACTED_VALUE,
     detected_secret_env_items,
     looks_sensitive_env_name,

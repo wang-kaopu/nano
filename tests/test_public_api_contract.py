@@ -32,7 +32,7 @@ def test_build_agent_returns_nano(tmp_path):
 def test_lightweight_package_split_uses_package_paths_without_legacy_shims():
     from nano.evaluation.evaluator import BenchmarkEvaluator
     from nano.evaluation.metrics import run_context_ablation_v2
-    from nano.features.memory import LayeredMemory
+    from nano.memory.memory import LayeredMemory
     from nano.providers.clients import FakeModelClient as ProviderFakeModelClient
 
     assert BenchmarkEvaluator is not None

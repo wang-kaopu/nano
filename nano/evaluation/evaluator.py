@@ -8,13 +8,14 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from ..features import memory as memorylib
-from ..providers.clients import FakeModelClient
-from ..runtime import Nano, SessionStore
-from ..run_store import RunStore
-from ..task_state import STOP_REASON_FINAL_ANSWER_RETURNED
-from ..tools import legal_tool_names
-from ..workspace import WorkspaceContext
+from nano.memory import memory as memorylib
+from nano.providers.clients import FakeModelClient
+from nano.runtime.runtime import Nano
+from nano.runtime.task_state import STOP_REASON_FINAL_ANSWER_RETURNED
+from nano.storage.run_store import RunStore
+from nano.storage.session_store import SessionStore
+from nano.tools.tools import legal_tool_names
+from nano.workspace.context import WorkspaceContext
 
 BENCHMARK_SCHEMA_VERSION = 1
 DEFAULT_BENCHMARK_PATH = Path("benchmarks/coding_tasks.json")

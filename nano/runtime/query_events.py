@@ -1,7 +1,7 @@
 """流式模型客户端与查询循环之间交换的标准化事件。"""
 
 from dataclasses import dataclass, field
-from .types import JsonObject
+from nano.types import JsonObject
 
 
 @dataclass(frozen=True)

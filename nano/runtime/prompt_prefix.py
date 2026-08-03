@@ -5,7 +5,7 @@ import json
 import textwrap
 from dataclasses import dataclass
 
-from .workspace import now
+from nano.utils import now
 
 
 @dataclass

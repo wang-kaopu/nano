@@ -7,8 +7,8 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from .query_events import QueryEvent
-from .workspace import clip, now
+from nano.runtime.query_events import QueryEvent
+from nano.utils import clip, now
 
 
 class QueryLoop:

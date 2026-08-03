@@ -1,4 +1,4 @@
-from nano.task_state import (
+from nano.runtime.task_state import (
     STOP_REASON_FINAL_ANSWER_RETURNED,
     STOP_REASON_RETRY_LIMIT_REACHED,
     STOP_REASON_STEP_LIMIT_REACHED,

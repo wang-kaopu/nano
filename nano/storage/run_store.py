@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .task_state import TaskState
+from nano.runtime.task_state import TaskState
 class RunStore:
     """管理单次运行的可审计持久化工件。"""
 

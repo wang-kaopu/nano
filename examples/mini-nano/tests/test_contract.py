@@ -17,15 +17,15 @@ def test_readme_main_mapping_points_to_existing_files():
     repo_root = Path(__file__).resolve().parents[3]
     main_files = [
         "nano/cli.py",
-        "nano/runtime.py",
-        "nano/agent_loop.py",
-        "nano/context_manager.py",
+        "nano/runtime/runtime.py",
+        "nano/runtime/agent_loop.py",
+        "nano/runtime/context_manager.py",
         "nano/providers/clients.py",
-        "nano/tool_executor.py",
-        "nano/tools.py",
-        "nano/task_state.py",
-        "nano/run_store.py",
-        "nano/workspace.py",
+        "nano/tools/tool_executor.py",
+        "nano/tools/tools.py",
+        "nano/runtime/task_state.py",
+        "nano/storage/run_store.py",
+        "nano/workspace/context.py",
     ]
     for path in main_files:
         assert (repo_root / path).exists()

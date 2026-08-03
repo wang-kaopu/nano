@@ -61,8 +61,8 @@ PY
 | 数字 | 怎么来的 | 复现/查看方式 |
 | --- | --- | --- |
 | 2 类模型后端 | 这是早期 `resume-metrics.md` 的 provider 实验口径，不等于当前 main 所有可配置 provider 数。当前 main 已经支持更多 provider 配置路径。 | 早期本地实验快照中的 `Model backends: 2` |
-| 7 类工具 | `nano/tools.py` 里 6 个基础工具，加上 `delegate`，总共 7 个可暴露工具。 | `BASE_TOOL_SPECS` 有 6 个：`list_files/read_file/search/run_shell/write_file/patch_file`，`legal_tool_names()` 额外加入 `delegate` |
-| 3 类运行工件 | 每次 run 固定落盘 `task_state.json`、`trace.jsonl`、`report.json`。 | `nano/run_store.py` 的 `task_state_path()`、`trace_path()`、`report_path()` |
+| 7 类工具 | `nano/tools/tools.py` 里 6 个基础工具，加上 `delegate`，总共 7 个可暴露工具。 | `BASE_TOOL_SPECS` 有 6 个：`list_files/read_file/search/run_shell/write_file/patch_file`，`legal_tool_names()` 额外加入 `delegate` |
+| 3 类运行工件 | 每次 run 固定落盘 `task_state.json`、`trace.jsonl`、`report.json`。 | `nano/storage/run_store.py` 的 `task_state_path()`、`trace_path()`、`report_path()` |
 
 面试解释：
 

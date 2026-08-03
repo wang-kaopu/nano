@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
-from .types import Environment, JsonValue
+from nano.types import Environment, JsonValue
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"

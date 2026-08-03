@@ -19,7 +19,7 @@ from nano import (
     WorkspaceContext,
     build_welcome,
 )
-from nano.query_events import ModelStreamEvent
+from nano.runtime.query_events import ModelStreamEvent
 
 
 def build_workspace(tmp_path):

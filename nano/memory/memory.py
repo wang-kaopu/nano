@@ -10,7 +10,7 @@ from datetime import datetime
 import re
 from pathlib import Path
 
-from ..workspace import clip, now
+from nano.utils import clip, now
 
 WORKING_FILE_LIMIT = 8
 EPISODIC_NOTE_LIMIT = 12
