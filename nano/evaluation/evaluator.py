@@ -1,8 +1,10 @@
 import hashlib
 import json
 import locale as locale_module
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -501,12 +503,16 @@ class BenchmarkEvaluator:
         expected_artifact_exists = artifact_file.exists()
         artifact_digest = _digest_file(artifact_file) if expected_artifact_exists else ""
 
+        verifier_env = os.environ.copy()
+        # Benchmark verifier 通过 shell 执行；优先使用启动 evaluator 的解释器环境，保证 `python` 指向同一虚拟环境。
+        verifier_env["PATH"] = str(Path(sys.executable).resolve().parent) + os.pathsep + verifier_env.get("PATH", "")
         verifier = subprocess.run(
             task["verifier"],
             cwd=fixture_copy_root,
             shell=True,
             capture_output=True,
             text=True,
+            env=verifier_env,
         )
 
         within_budget = task_state.tool_steps <= int(task["step_budget"])

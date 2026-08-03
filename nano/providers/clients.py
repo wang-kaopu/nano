@@ -341,7 +341,7 @@ class OpenAICompatibleModelClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-            payload["parallel_tool_calls"] = False
+            payload["parallel_tool_calls"] = True
         # runtime 传入的是“稳定前缀”的签名，而不是整段 prompt 的签名。
         # 这样缓存复用针对的是稳定段，不会因为动态 history 每轮变化而失效。
         if self.supports_prompt_cache and prompt_cache_key:
@@ -433,7 +433,7 @@ class OpenAICompatibleModelClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-            payload["parallel_tool_calls"] = False
+            payload["parallel_tool_calls"] = True
         if self.supports_prompt_cache and prompt_cache_key:
             payload["prompt_cache_key"] = prompt_cache_key
         if self.supports_prompt_cache and prompt_cache_retention:
@@ -545,7 +545,7 @@ class AnthropicCompatibleModelClient:
             payload["temperature"] = self.temperature
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
 
         headers = {
             "Content-Type": "application/json",
@@ -607,7 +607,7 @@ class AnthropicCompatibleModelClient:
             payload["temperature"] = self.temperature
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": True}
+            payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
         content_blocks: dict[int, JsonObject] = {}
         try:

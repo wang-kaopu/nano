@@ -10,7 +10,7 @@ Agent Harness v1 is Nano's current runtime shape: a local control loop around a 
 4. Build bounded prompt context.
 5. Request the model response.
 6. Parse the response into a tool call, retry notice, or final answer.
-7. Execute tools through runtime policy.
+7. Start eligible read-only tools while the response stream is still active, then execute remaining tools in call order through runtime policy.
 8. Write task state, trace events, checkpoints, and report artifacts.
 
 ## State Artifacts

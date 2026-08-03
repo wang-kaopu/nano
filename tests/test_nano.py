@@ -20,6 +20,7 @@ from nano import (
     build_welcome,
 )
 from nano.runtime.query_events import ModelStreamEvent
+from nano.tools.tool_executor import ToolExecutionResult
 
 
 def build_workspace(tmp_path):
@@ -592,7 +593,7 @@ def test_openai_compatible_client_sends_function_tools_and_emits_function_call()
 
     assert captured["body"]["tools"] == tools
     assert captured["body"]["tool_choice"] == "auto"
-    assert captured["body"]["parallel_tool_calls"] is False
+    assert captured["body"]["parallel_tool_calls"] is True
     assert events[0].type == "tool_call"
     assert events[0].metadata == {"call_id": "call_1", "name": "read_file", "arguments": '{"path":"README.md"}'}
     assert events[1].type == "completed"
@@ -648,6 +649,76 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
 
     assert agent.ask("Read the README") == "Native result"
     assert len(client.requests) == 2
+
+
+def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_writes(tmp_path):
+    class NativeToolClient:
+        supports_native_tool_calls = True
+        supports_prompt_cache = False
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+            self.requests = []
+            self.executed_tools = []
+            self.stream_completed = False
+
+        async def stream(self, prompt, max_new_tokens, **kwargs):
+            self.requests.append(kwargs)
+            if len(self.requests) == 1:
+                yield ModelStreamEvent("tool_call", metadata={"call_id": "call_list", "name": "list_files", "arguments": "{}"})
+                await asyncio.sleep(0)
+                assert self.executed_tools == ["list_files"]
+                yield ModelStreamEvent("tool_call", metadata={"call_id": "call_write", "name": "write_file", "arguments": '{"path":"note.txt","content":"done"}'})
+                await asyncio.sleep(0)
+                assert self.executed_tools == ["list_files"]
+                yield ModelStreamEvent("tool_call", metadata={"call_id": "call_search", "name": "search", "arguments": '{"pattern":"TODO"}'})
+                await asyncio.sleep(0)
+                assert self.executed_tools == ["list_files", "search"]
+                yield ModelStreamEvent("tool_call", metadata={"call_id": "call_read", "name": "read_file", "arguments": '{"path":"README.md","start":1,"end":1}'})
+                await asyncio.sleep(0)
+                assert self.executed_tools == ["list_files", "search"]
+                self.stream_completed = True
+                yield ModelStreamEvent(
+                    "completed",
+                    metadata={
+                        "response_output": [
+                            {"type": "function_call", "call_id": "call_list", "name": "list_files", "arguments": "{}"},
+                            {"type": "function_call", "call_id": "call_write", "name": "write_file", "arguments": '{"path":"note.txt","content":"done"}'},
+                            {"type": "function_call", "call_id": "call_search", "name": "search", "arguments": '{"pattern":"TODO"}'},
+                            {"type": "function_call", "call_id": "call_read", "name": "read_file", "arguments": '{"path":"README.md","start":1,"end":1}'},
+                        ]
+                    },
+                )
+                return
+            outputs = kwargs["input_items"][-4:]
+            assert [item["call_id"] for item in outputs] == ["call_list", "call_write", "call_search", "call_read"]
+            yield ModelStreamEvent("text_delta", text="Completed")
+            yield ModelStreamEvent("completed", metadata={"response_output": []})
+
+    client = NativeToolClient()
+    workspace = build_workspace(tmp_path)
+    agent = Nano(
+        model_client=client,
+        workspace=workspace,
+        session_store=SessionStore(tmp_path / ".nano" / "sessions"),
+        approval_policy="auto",
+    )
+    read_file = agent.tools["read_file"]
+    original_concurrency_safe = read_file.concurrency_safe
+    read_file.concurrency_safe = False
+
+    async def execute_async(name, args):
+        if name in {"write_file", "read_file"}:
+            assert client.stream_completed is True
+        client.executed_tools.append(name)
+        return ToolExecutionResult(content=f"{name} completed", metadata={})
+
+    agent.tool_executor.execute_async = execute_async
+    try:
+        assert agent.ask("Inspect and update the project") == "Completed"
+        assert client.executed_tools == ["list_files", "search", "write_file", "read_file"]
+    finally:
+        read_file.concurrency_safe = original_concurrency_safe
 
 
 def test_openai_compatible_client_extracts_text_from_event_stream():
