@@ -1,9 +1,14 @@
+import asyncio
+import time
+
 from nano.utils.frontmatter import parse_frontmatter
 from nano.memory.memory import (
     MAX_INDEX_BYTES,
     MAX_INDEX_LINES,
     MAX_MEMORY_BYTES_PER_FILE,
+    MAX_SURFACED_MEMORY_BYTES,
     LayeredMemory,
+    format_memories_for_injection,
     get_memory_dir,
     load_memory_index,
     save_memory,
@@ -108,3 +113,41 @@ def test_file_summaries_use_canonical_paths_and_freshness(tmp_path):
     assert "sample.txt: alpha" in memory.render_memory_text()
     file_path.write_text("beta\n", encoding="utf-8")
     assert "sample.txt: alpha" not in memory.render_memory_text()
+
+
+def test_memory_prefetch_applies_gates_and_consumes_only_after_completion(tmp_path):
+    async def run() -> None:
+        empty_memory = LayeredMemory(workspace_root=tmp_path / "empty")
+        assert empty_memory.start_memory_prefetch("two words", lambda *_: "{}") is None
+
+        memory = LayeredMemory(workspace_root=tmp_path)
+        assert memory.memory_dir is not None
+        filename = save_memory(
+            "CI dashboard",
+            "Deployment workflow and dashboard URL.",
+            "reference",
+            "Deploy through the release workflow.",
+            memory.memory_dir,
+        )
+        assert memory.start_memory_prefetch("deploy", lambda *_: "{}") is None
+        assert memory.start_memory_prefetch("部", lambda *_: "{}") is None
+        memory.state["surfaced_memory_bytes"] = MAX_SURFACED_MEMORY_BYTES
+        assert memory.start_memory_prefetch("check deployment", lambda *_: "{}") is None
+        memory.state["surfaced_memory_bytes"] = 0
+
+        def side_query(system_prompt, user_prompt):
+            time.sleep(0.02)
+            return f'{{"selected_memories": ["{filename}"]}}'
+
+        prefetch = memory.start_memory_prefetch("check deployment", side_query)
+        assert prefetch is not None
+        assert memory.consume_memory_prefetch(prefetch) == []
+        await prefetch.task
+        selected = memory.consume_memory_prefetch(prefetch)
+
+        assert [item.filename for item in selected] == [filename]
+        assert "<system-reminder>" in format_memories_for_injection(selected)
+        assert memory.to_dict()["surfaced_memory_bytes"] > 0
+        assert memory.consume_memory_prefetch(prefetch) == []
+
+    asyncio.run(run())

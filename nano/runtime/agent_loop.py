@@ -32,6 +32,7 @@ class QueryEngine:
         runtime.memory.set_task_summary(user_message)
         runtime.record({"role": "user", "content": user_message, "created_at": now()})
         runtime.record_conversation({"role": "user", "content": user_message, "created_at": now()})
+        memory_prefetch = runtime.start_memory_prefetch(user_message)
 
         task_state = TaskState.create(run_id=runtime.new_run_id(), task_id=runtime.new_task_id(), user_request=user_message)
         task_state.resume_status = runtime.resume_state.get("status", CHECKPOINT_NONE_STATUS)
@@ -48,7 +49,7 @@ class QueryEngine:
         )
 
         try:
-            async for event in QueryLoop(runtime, task_state, user_message).run():
+            async for event in QueryLoop(runtime, task_state, user_message, memory_prefetch).run():
                 if event_callback is not None:
                     event_callback(event)
                 if event.type == "prompt_built":
@@ -111,6 +112,8 @@ class QueryEngine:
             runtime.record({"role": "assistant", "content": final, "created_at": now()})
             return self._finish_stopped(task_state, user_message, final, run_started_at)
         finally:
+            if memory_prefetch is not None and not memory_prefetch.settled:
+                memory_prefetch.task.cancel()
             runtime._current_query_task = None
 
         raise RuntimeError("QueryLoop ended without a final event")

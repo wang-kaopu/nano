@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -52,6 +53,19 @@ class RelevantMemory:
     content: str
     mtime_ms: float
     header: str
+
+
+@dataclass
+class MemoryPrefetch:
+    """表示尚未消费的异步语义召回任务。"""
+
+    task: asyncio.Task[list[RelevantMemory]]
+    consumed: bool = False
+
+    @property
+    def settled(self) -> bool:
+        """返回预取任务是否已经结束，无论成功、失败或取消。"""
+        return self.task.done()
 
 
 def memory_project_hash(cwd: Path | None = None) -> str:
@@ -263,6 +277,11 @@ def select_relevant_memories(
         )
         consumed_bytes += len(content.encode("utf-8"))
     return selected
+
+
+def format_memories_for_injection(memories: list[RelevantMemory]) -> str:
+    """将召回记忆包装为模型可区分的系统提醒消息。"""
+    return "\n\n".join(f"<system-reminder>\n{memory.header}\n\n{memory.content}\n</system-reminder>" for memory in memories)
 
 
 def default_memory_state():
@@ -536,6 +555,46 @@ class LayeredMemory:
         self.state["surfaced_memory_paths"].extend(str(memory.path) for memory in selected)
         self.state["surfaced_memory_bytes"] += sum(len(memory.content.encode("utf-8")) for memory in selected)
         return selected
+
+    def start_memory_prefetch(self, query: str, side_query: Callable[[str, str], str]) -> MemoryPrefetch | None:
+        """异步启动满足门控条件的语义召回，不阻塞当前模型请求。"""
+        if self.memory_dir is None or not self._is_recallable_query(query):
+            return None
+        if self.state["surfaced_memory_bytes"] >= MAX_SURFACED_MEMORY_BYTES:
+            return None
+        if not self.memory_dir.exists() or not any(path.suffix == ".md" and path.name != "MEMORY.md" for path in self.memory_dir.iterdir()):
+            return None
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                select_relevant_memories,
+                query,
+                side_query,
+                set(self.state["surfaced_memory_paths"]),
+                self.memory_dir,
+                MAX_SURFACED_MEMORY_BYTES - self.state["surfaced_memory_bytes"],
+            )
+        )
+        return MemoryPrefetch(task=task)
+
+    def consume_memory_prefetch(self, prefetch: MemoryPrefetch | None) -> list[RelevantMemory]:
+        """非阻塞地消费已完成预取，并在此时才计入会话预算。"""
+        if prefetch is None or prefetch.consumed or not prefetch.settled:
+            return []
+        prefetch.consumed = True
+        try:
+            selected = prefetch.task.result()
+        except (asyncio.CancelledError, Exception):
+            return []
+        self.state["surfaced_memory_paths"].extend(str(memory.path) for memory in selected)
+        self.state["surfaced_memory_bytes"] += sum(len(memory.content.encode("utf-8")) for memory in selected)
+        return selected
+
+    @staticmethod
+    def _is_recallable_query(query: str) -> bool:
+        """仅允许至少两个 CJK 字符或至少两个空格分词的查询触发召回。"""
+        text = str(query).strip()
+        cjk_count = len(re.findall(r"[\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]", text))
+        return cjk_count >= 2 or len(text.split()) >= 2
 
     def render_memory_text(self):
         """渲染工作记忆仪表盘。"""

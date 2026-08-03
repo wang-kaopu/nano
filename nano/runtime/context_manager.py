@@ -21,7 +21,7 @@ class ContextManager:
         """绑定提供 prefix、memory 和会话状态的运行时。"""
         self.agent = agent
 
-    def build(self, user_message: str, include_prefix: bool = True) -> tuple[str, dict[str, Any]]:
+    def build(self, user_message: str, include_prefix: bool = True, relevant_memories: list[Any] | None = None) -> tuple[str, dict[str, Any]]:
         """组装一轮完整 prompt，并记录各 section 的原始长度。"""
         user_message = str(user_message)
         memory_enabled = self.agent.feature_enabled("memory")
@@ -31,11 +31,9 @@ class ContextManager:
         if checkpoint_text and include_prefix:
             prefix = prefix + "\n\n" + checkpoint_text
         memory = "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text())
-        selected_memories = []
-        if memory_enabled and relevant_memory_enabled:
-            selected_memories = self.agent.memory.select_relevant_memories(user_message, self.agent.side_query)
+        selected_memories = relevant_memories or []
         relevant_memory = (
-            "\n\n".join(["Relevant memories:", *[f"{memory.header}\n{memory.content}" for memory in selected_memories]])
+            "\n\n".join(["Relevant memories:", *[f"<system-reminder>\n{memory.header}\n\n{memory.content}\n</system-reminder>" for memory in selected_memories]])
             if selected_memories
             else "Relevant memories:\n- none"
         )

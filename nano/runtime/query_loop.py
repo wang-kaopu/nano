@@ -8,6 +8,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+from nano.memory import memory as memorylib
 from nano.runtime.query_events import QueryEvent
 from nano.utils.text import clip, now
 
@@ -18,11 +19,13 @@ MICROCOMPACT_IDLE_S = 5 * 60
 class QueryLoop:
     """执行一条用户请求，直至得到最终答案或达到限制。"""
 
-    def __init__(self, runtime, task_state, user_message):
+    def __init__(self, runtime, task_state, user_message, memory_prefetch=None):
         """绑定内层循环执行所需的请求级状态。"""
         self.runtime = runtime
         self.task_state = task_state
         self.user_message = str(user_message)
+        self.memory_prefetch = memory_prefetch
+        self.injected_memories = []
         self.max_attempts = max(runtime.max_steps * 3, runtime.max_steps + 4)
 
     def _budget_tool_results_anthropic(self, messages: list[dict[str, Any]]) -> None:
@@ -58,9 +61,11 @@ class QueryLoop:
             if message.get("role") == "assistant":
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_use":
+                        input_value = block.get("input")
+                        tool_input: dict[str, Any] = input_value if isinstance(input_value, dict) else {}
                         tool_uses[str(block.get("id", ""))] = (
                             str(block.get("name", "")),
-                            block.get("input") if isinstance(block.get("input"), dict) else {},
+                            tool_input,
                         )
                 continue
             if message.get("role") != "user":
@@ -184,7 +189,21 @@ class QueryLoop:
                 return
             if auto_compacted:
                 native_input.clear()
-            prompt, prompt_metadata = self.runtime._build_prompt_and_metadata(self.user_message, include_prefix=native_tool_call_protocol != "anthropic")
+            selected_memories = self.runtime.memory.consume_memory_prefetch(self.memory_prefetch)
+            if selected_memories:
+                self.injected_memories = selected_memories
+                if native_tool_calls and native_input:
+                    native_input.append(
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": memorylib.format_memories_for_injection(selected_memories)}],
+                        }
+                    )
+            prompt, prompt_metadata = self.runtime._build_prompt_and_metadata(
+                self.user_message,
+                include_prefix=native_tool_call_protocol != "anthropic",
+                relevant_memories=self.injected_memories,
+            )
             if native_tool_calls and not native_input:
                 content_type = "text" if native_tool_call_protocol == "anthropic" else "input_text"
                 native_input.append({"role": "user", "content": [{"type": content_type, "text": prompt}]})

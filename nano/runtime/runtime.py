@@ -259,6 +259,12 @@ class Nano:
         """复用当前配置模型执行低成本语义记忆选择。"""
         return str(self.model_client.complete(f"{system_prompt}\n\n{user_prompt}", 512, prompt_cache_key=None, prompt_cache_retention=None))
 
+    def start_memory_prefetch(self, user_message: str):
+        """为顶层请求异步启动语义记忆召回。"""
+        if self.depth > 0 or not self.feature_enabled("memory") or not self.feature_enabled("relevant_memory"):
+            return None
+        return self.memory.start_memory_prefetch(user_message, self.side_query)
+
     def history_text(self) -> str:
         history = self.session["history"]
         if not history:
@@ -349,10 +355,14 @@ class Nano:
         """返回注入 Anthropic 首条 user 消息的项目级系统提醒。"""
         return self.prefix_state.user_system_reminder
 
-    def _build_prompt_and_metadata(self, user_message, include_prefix: bool = True):
+    def _build_prompt_and_metadata(self, user_message, include_prefix: bool = True, relevant_memories=None):
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
-        prompt, metadata = self.context_manager.build(user_message, include_prefix=include_prefix)
+        prompt, metadata = self.context_manager.build(
+            user_message,
+            include_prefix=include_prefix,
+            relevant_memories=relevant_memories,
+        )
         # 这里把“这轮 prompt 是怎么拼出来的”连同缓存相关状态一起记下来，
         # 后面 trace/report 才能解释清楚：为什么这一轮 prefix 变了、缓存有没有命中。
         metadata.update(
