@@ -2,18 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from collections.abc import AsyncIterator, Mapping
+from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from nano.runtime.query_events import ModelStreamEvent
-
-JsonValue: TypeAlias = Any
-JsonObject: TypeAlias = dict[str, JsonValue]
-ToolArguments: TypeAlias = Mapping[str, JsonValue]
-ToolArgumentsDict: TypeAlias = dict[str, JsonValue]
-Environment: TypeAlias = Mapping[str, str]
-
 
 class ModelClient(Protocol):
     """定义运行时可调用的统一模型客户端接口。"""
@@ -22,7 +15,7 @@ class ModelClient(Protocol):
     supports_prompt_cache: bool
     supports_native_tool_calls: bool
     native_tool_call_protocol: str
-    last_completion_metadata: JsonObject
+    last_completion_metadata: dict[str, Any]
 
     def complete(
         self,
@@ -50,9 +43,6 @@ class ModelClient(Protocol):
 class ToolRunner(Protocol):
     """定义工具注册表中可执行函数的统一接口。"""
 
-    def __call__(self, args: ToolArguments) -> str:
+    def __call__(self, args: Mapping[str, Any]) -> str:
         """执行已校验的工具参数并返回文本结果。"""
         ...
-
-
-StringSequence: TypeAlias = Sequence[str]

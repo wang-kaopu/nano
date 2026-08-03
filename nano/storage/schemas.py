@@ -78,11 +78,6 @@ class ProviderEnvelopeModel(BaseModel):
     error: ProviderErrorModel | str | None = None
 
 
-class OllamaResponseModel(ProviderEnvelopeModel):
-    """校验 Ollama 生成响应。"""
-
-    response: str = ""
-
 
 class OpenAIResponseModel(ProviderEnvelopeModel):
     """校验 OpenAI-compatible JSON 响应。"""

@@ -23,7 +23,7 @@ from prompt_toolkit.shortcuts import CompleteStyle, PromptSession
 from prompt_toolkit.widgets import Dialog, Label, RadioList
 
 from nano.config import load_project_env, provider_env
-from nano.providers.clients import AnthropicCompatibleModelClient, OllamaModelClient, OpenAICompatibleModelClient
+from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import Nano
 from nano.storage.session_store import SessionStore
@@ -68,8 +68,6 @@ HELP_DETAILS = textwrap.dedent(
 INTERRUPT_CONFIRMATION_SECONDS = 2.0
 
 
-DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
-DEFAULT_OLLAMA_HOST = "http://127.0.0.1:11434"
 DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_OPENAI_BASE_URL = "https://www.right.codes/codex/v1"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6"
@@ -224,7 +222,7 @@ def _effective_model(args, provider):
         if model:
             return model
         return DEFAULT_DEEPSEEK_MODEL
-    return DEFAULT_OLLAMA_MODEL
+    raise ValueError(f"Unsupported provider: {provider}")
 
 
 def _configured_secret_names(args):
@@ -284,15 +282,7 @@ def _build_model_client(args):
             timeout=args.openai_timeout,
         )
 
-    model = _effective_model(args, provider)
-    host = args.host
-    return OllamaModelClient(
-        model=model,
-        host=host,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        timeout=args.ollama_timeout,
-    )
+    raise ValueError(f"Unsupported provider: {provider}")
 
 
 def build_welcome(agent, model, host):
@@ -391,19 +381,17 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for DeepSeek, OpenAI-compatible, Anthropic-compatible, or Ollama models.",
+        description="Minimal coding agent for DeepSeek, OpenAI-compatible, or Anthropic-compatible models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--provider", choices=("ollama", "openai", "anthropic", "deepseek"), default="deepseek", help="Model backend to use.")
+    parser.add_argument("--provider", choices=("openai", "anthropic", "deepseek"), default="deepseek", help="Model backend to use.")
     parser.add_argument(
         "--model",
         default=None,
-        help="Model name override. Defaults to qwen3.5:4b for Ollama, NANO_OPENAI_MODEL for openai, NANO_ANTHROPIC_MODEL for anthropic, and NANO_DEEPSEEK_MODEL for deepseek when set.",
+        help="Model name override. Defaults to NANO_OPENAI_MODEL for openai, NANO_ANTHROPIC_MODEL for anthropic, and NANO_DEEPSEEK_MODEL for deepseek when set.",
     )
-    parser.add_argument("--host", default=DEFAULT_OLLAMA_HOST, help="Ollama server URL.")
     parser.add_argument("--base-url", default=None, help="Provider API base URL for deepseek, openai, or anthropic.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
     parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
@@ -416,8 +404,7 @@ def build_arg_parser():
     )
     parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the provider.")
     return parser
 
 
@@ -426,7 +413,7 @@ def main(argv=None):
     agent = build_agent(args)
 
     model = agent.model_client.model
-    host = agent.model_client.host if isinstance(agent.model_client, OllamaModelClient) else agent.model_client.base_url
+    host = agent.model_client.base_url
     print(build_welcome(agent, model=model, host=host))
 
     if args.prompt:

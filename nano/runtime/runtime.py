@@ -28,7 +28,7 @@ from nano.tools.security import REDACTED_VALUE
 from nano.tools.tool import Tool, ToolProgressData
 from nano.tools.tool_context import ToolContext
 from nano.tools.tool_executor import ToolExecutor
-from nano.types import JsonObject, ModelClient
+from nano.types import ModelClient
 from nano.utils import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
 
@@ -167,7 +167,7 @@ class Nano:
             self.session["resume_state"] = {}
         self.session.setdefault("last_input_token_count", 0)
 
-    def current_runtime_identity(self) -> JsonObject:
+    def current_runtime_identity(self) -> dict[str, Any]:
         return checkpointlib.current_runtime_identity(self)
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -337,9 +337,9 @@ class Nano:
         _, metadata = self._build_prompt_and_metadata(user_message)
         return metadata
 
-    def anthropic_system_blocks(self) -> list[JsonObject]:
+    def anthropic_system_blocks(self) -> list[dict[str, Any]]:
         """构建 Anthropic 显式缓存的静态 system block 与未缓存动态尾巴。"""
-        blocks: list[JsonObject] = [{"type": "text", "text": self.prefix_state.static_system, "cache_control": {"type": "ephemeral"}}]
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": self.prefix_state.static_system, "cache_control": {"type": "ephemeral"}}]
         dynamic_text = self.prefix_state.dynamic_system
         checkpoint_text = self.render_checkpoint_text().strip()
         if checkpoint_text:

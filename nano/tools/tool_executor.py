@@ -2,13 +2,12 @@
 
 import asyncio
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.tools.tools import tool_definition
-from nano.types import JsonObject, ToolArguments
 from nano.utils import clip
 
 
@@ -35,7 +34,7 @@ class ToolExecutionResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     content: str
-    metadata: JsonObject
+    metadata: dict[str, Any]
 
 
 def _metadata(
@@ -49,7 +48,7 @@ def _metadata(
     workspace_fingerprint: str = "",
     diff_summary: Iterable[str] | None = None,
     result_artifact_path: str = "",
-) -> JsonObject:
+) -> dict[str, Any]:
     """创建并序列化工具审计元数据。"""
     return ToolExecutionMetadata(
         tool_status=tool_status,
@@ -84,7 +83,7 @@ class ToolExecutor:
         preview_limit = max(61, tool.max_result_size_chars - len(notice))
         return clip(content, preview_limit) + notice, artifact_path
 
-    def execute(self, name: str, args: ToolArguments) -> ToolExecutionResult:
+    def execute(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
         """执行一次工具调用并返回结构化结果。"""
         agent = self.agent
         tool = agent.tools.get(name)
@@ -249,6 +248,6 @@ class ToolExecutor:
             agent.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
 
-    async def execute_async(self, name: str, args: ToolArguments) -> ToolExecutionResult:
+    async def execute_async(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
         """在不阻塞事件循环的前提下执行同步安全闸口。"""
         return await asyncio.to_thread(self.execute, name, args)

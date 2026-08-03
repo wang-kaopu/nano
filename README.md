@@ -18,8 +18,7 @@
 - 模块入口是 `python -m nano`
 - 会话保存在 `.nano/sessions/`
 - 每次运行的工件保存在 `.nano/runs/<run_id>/`
-- 支持四类模型后端：
-  - Ollama
+- 支持三类模型后端：
   - OpenAI 兼容 Responses API
   - Anthropic 兼容 Messages API
   - DeepSeek Anthropic 兼容 API
@@ -97,7 +96,7 @@ Nano 启动时会读取项目根目录的 `.env`。本地真实 key 放在 `.env
 显式 CLI 参数 > .env 里的 NANO_* 变量 > 旧环境变量 > 代码默认值
 ```
 
-不传 `--provider` 时默认使用 `deepseek`。这是推荐配置路径：DeepSeek 的 Anthropic-compatible endpoint 比本地 Ollama 更少依赖本机模型环境，也比 OpenAI-compatible/Anthropic-compatible 代理少一层默认 gateway 假设。其他 provider 仍然保留，可以显式传 `--provider openai`、`--provider anthropic` 或 `--provider ollama`。
+不传 `--provider` 时默认使用 `deepseek`。这是推荐配置路径：DeepSeek 的 Anthropic-compatible endpoint 比 OpenAI-compatible/Anthropic-compatible 代理少一层默认 gateway 假设。其他 provider 仍然保留，可以显式传 `--provider openai` 或 `--provider anthropic`。
 
 `.env` 会在构建 provider client 前加载，并覆盖当前进程里的同名环境变量。模型名和 base URL 可以通过 `--model`、`--base-url` 临时覆盖；API key 只从环境变量读取。
 
@@ -176,7 +175,6 @@ NANO_ANTHROPIC_API_KEY="your-right-codes-key-for-claude"
 | `deepseek` | `NANO_DEEPSEEK_API_BASE`，回退 `DEEPSEEK_API_BASE`，默认 `https://api.deepseek.com/anthropic` | `NANO_DEEPSEEK_API_KEY`，回退 `DEEPSEEK_API_KEY` | `NANO_DEEPSEEK_MODEL`，回退 `DEEPSEEK_MODEL`，默认 `deepseek-v4-pro` |
 | `openai` | `NANO_OPENAI_API_BASE`，回退 `OPENAI_API_BASE`，默认 `https://www.right.codes/codex/v1` | `NANO_OPENAI_API_KEY`，回退 `OPENAI_API_KEY`、`NANO_RIGHT_CODES_API_KEY`、`RIGHT_CODES_API_KEY`、`NANO_ANTHROPIC_API_KEY`、`ANTHROPIC_API_KEY` | `NANO_OPENAI_MODEL`，回退 `OPENAI_MODEL`，默认 `gpt-5.4` |
 | `anthropic` | `NANO_ANTHROPIC_API_BASE`，回退 `ANTHROPIC_API_BASE`，默认 `https://www.right.codes/claude/v1` | `NANO_ANTHROPIC_API_KEY`，回退 `ANTHROPIC_API_KEY`、`NANO_RIGHT_CODES_API_KEY`、`RIGHT_CODES_API_KEY`、`NANO_OPENAI_API_KEY`、`OPENAI_API_KEY` | `NANO_ANTHROPIC_MODEL`，回退 `ANTHROPIC_MODEL`，默认 `claude-sonnet-4-6` |
-| `ollama` | `--host`，默认 `http://127.0.0.1:11434` | 不需要 | `--model`，默认 `qwen3.5:4b` |
 
 如果有额外的敏感环境变量需要从 trace/report 里脱敏，可以用 `NANO_SECRET_ENV_NAMES` 配置逗号分隔的变量名，或启动时重复传 `--secret-env-name NAME`。
 
@@ -221,16 +219,6 @@ NANO_ANTHROPIC_MODEL="claude-sonnet-4-6"
 ```
 
 如果你的服务端对多个兼容接口复用了同一套密钥，`nano` 也支持从 `NANO_ANTHROPIC_API_KEY` 回退到 `ANTHROPIC_API_KEY`、`NANO_RIGHT_CODES_API_KEY`、`RIGHT_CODES_API_KEY`、`NANO_OPENAI_API_KEY` 或 `OPENAI_API_KEY`。
-
-### Ollama
-
-如果要改用本地 Ollama，显式传 `--provider ollama`：
-
-```bash
-ollama serve
-ollama pull qwen3.5:4b
-uv run nano --provider ollama --model qwen3.5:4b
-```
 
 ## 常用交互命令
 

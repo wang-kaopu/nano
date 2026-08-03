@@ -13,7 +13,6 @@ from nano import (
     AnthropicCompatibleModelClient,
     FakeModelClient,
     Nano,
-    OllamaModelClient,
     OpenAICompatibleModelClient,
     SessionStore,
     WorkspaceContext,
@@ -377,43 +376,6 @@ def test_repeated_identical_tool_call_is_rejected(tmp_path):
 
     assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
 
-
-def test_ollama_client_posts_expected_payload():
-    captured = {}
-
-    class FakeResponse:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self):
-            return json.dumps({"response": "<final>ok</final>"}).encode("utf-8")
-
-    def fake_urlopen(request, timeout):
-        captured["url"] = request.full_url
-        captured["timeout"] = timeout
-        captured["body"] = json.loads(request.data.decode("utf-8"))
-        return FakeResponse()
-
-    client = OllamaModelClient(
-        model="qwen3.5:4b",
-        host="http://127.0.0.1:11434",
-        temperature=0.2,
-        top_p=0.9,
-        timeout=30,
-    )
-
-    with patch_httpx_post(fake_urlopen):
-        result = client.complete("hello", 42)
-
-    assert result == "<final>ok</final>"
-    assert captured["url"] == "http://127.0.0.1:11434/api/generate"
-    assert captured["timeout"] == 30
-    assert captured["body"]["model"] == "qwen3.5:4b"
-    assert captured["body"]["prompt"] == "hello"
-    assert captured["body"]["stream"] is False
 
 
 def test_openai_compatible_client_posts_expected_responses_payload():
@@ -932,10 +894,7 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
             "provider": "openai",
             "model": "override-model",
             "base_url": None,
-            "host": "http://127.0.0.1:11434",
-            "ollama_timeout": 300,
             "temperature": 0.2,
-            "top_p": 0.9,
             "resume": None,
             "approval": "ask",
             "secret_env_names": [],
@@ -953,10 +912,7 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
         },
         clear=False,
     ):
-        with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
+        with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
             fake_client = mock_openai.return_value
             agent = nano_pkg.build_agent(args)
 
@@ -976,11 +932,8 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
             "provider": "openai",
             "model": None,
             "base_url": None,
-            "host": "http://127.0.0.1:11434",
-            "ollama_timeout": 300,
             "openai_timeout": 300,
             "temperature": 0.2,
-            "top_p": 0.9,
             "resume": None,
             "approval": "ask",
             "secret_env_names": [],
@@ -990,10 +943,7 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
     )()
 
     with patch.dict(os.environ, {"NANO_RIGHT_CODES_API_KEY": "sk-right-codes"}, clear=True):
-        with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
+        with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
             fake_client = mock_openai.return_value
             agent = nano_pkg.build_agent(args)
 
@@ -1029,11 +979,8 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
             "provider": "anthropic",
             "model": "claude-sonnet-4-5-20250929",
             "base_url": None,
-            "host": "http://127.0.0.1:11434",
-            "ollama_timeout": 300,
             "openai_timeout": 300,
             "temperature": 0.2,
-            "top_p": 0.9,
             "resume": None,
             "approval": "ask",
             "secret_env_names": [],
@@ -1050,9 +997,6 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
         clear=True,
     ):
         with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
@@ -1101,11 +1045,8 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
             "provider": "deepseek",
             "model": None,
             "base_url": None,
-            "host": "http://127.0.0.1:11434",
-            "ollama_timeout": 300,
             "openai_timeout": 300,
             "temperature": 0.2,
-            "top_p": 0.9,
             "resume": None,
             "approval": "ask",
             "secret_env_names": [],
@@ -1126,9 +1067,6 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
         clear=True,
     ):
         with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
@@ -1165,9 +1103,6 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
         clear=False,
     ):
         with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
@@ -1196,9 +1131,6 @@ def test_build_agent_uses_project_env_deepseek_key_by_default(tmp_path):
 
     with patch.dict(os.environ, {}, clear=True):
         with patch(
-            "nano.cli.OllamaModelClient",
-            side_effect=AssertionError("ollama client should not be used"),
-        ), patch(
             "nano.cli.OpenAICompatibleModelClient",
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
@@ -1903,7 +1835,6 @@ def test_public_api_exports_resolve_through_package_path():
     assert callable(build_welcome)
     assert FakeModelClient is not None
     assert Nano is not None
-    assert OllamaModelClient is not None
     assert SessionStore is not None
     assert WorkspaceContext is not None
     assert Path(nano_pkg.__file__).as_posix().endswith("/nano/__init__.py")

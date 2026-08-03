@@ -17,8 +17,7 @@ from typing import Any
 import httpx
 
 from nano.runtime.query_events import ModelStreamEvent
-from nano.storage.schemas import AnthropicResponseModel, OllamaResponseModel, OpenAIResponseModel
-from nano.types import JsonObject
+from nano.storage.schemas import AnthropicResponseModel, OpenAIResponseModel
 
 OPENAI_COMPATIBLE_USER_AGENT = "nano/0.1"
 MAX_RETRIES = 3
@@ -78,7 +77,7 @@ async def _wait_to_retry(error: Any, attempt: int, max_retries: int) -> bool:
     return True
 
 
-def _validate_json_response(body_text: str, model: type[Any]) -> JsonObject:
+def _validate_json_response(body_text: str, model: type[Any]) -> dict[str, Any]:
     """将 provider JSON 响应校验为指定 Pydantic 模型并返回字典。"""
     try:
         return model.model_validate_json(body_text).model_dump(mode="python")
@@ -100,7 +99,7 @@ def _response_status_code(response: Any) -> int:
 
 def _request_with_retries(
     url: str,
-    payload: JsonObject,
+    payload: dict[str, Any],
     headers: Mapping[str, str],
     timeout: float,
     max_retries: int = MAX_RETRIES,
@@ -153,111 +152,6 @@ class FakeModelClient:
         yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata or {}))
 
 
-class OllamaModelClient:
-    """通过 Ollama generate API 请求模型。"""
-
-    def __init__(self, model: str, host: str, temperature: float | None, top_p: float | None, timeout: float) -> None:
-        self.model = model
-        self.host = host.rstrip("/")
-        self.temperature = temperature
-        self.supports_native_tool_calls = False
-        self.native_tool_call_protocol = "openai"
-        self.top_p = top_p
-        self.timeout = timeout
-        self.supports_prompt_cache = False
-        self.last_completion_metadata = {}
-
-    def complete(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> str:
-        """请求一条非流式 Ollama 完成响应。"""
-        # Ollama 当前不支持我们这里接入的 prompt cache 语义，
-        # 所以 runtime 传下来的缓存参数会被忽略。
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        headers = {"Content-Type": "application/json"}
-        try:
-            response = _request_with_retries(
-                self.host + "/api/generate",
-                payload,
-                headers,
-                self.timeout,
-            )
-        except httpx.RequestError as exc:
-            raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
-                f"Host: {self.host}\n"
-                f"Model: {self.model}"
-            ) from exc
-        if _response_status_code(response) >= 400:
-            raise RuntimeError(f"Ollama request failed with HTTP {_response_status_code(response)}: {_response_text(response)}")
-        data = _validate_json_response(_response_text(response), OllamaResponseModel)
-
-        if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
-
-    async def stream(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
-        """将 Ollama generate 分块转换为标准化模型事件。"""
-        del kwargs
-        self.last_completion_metadata = {}
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": True,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
-        }
-        for attempt in range(MAX_RETRIES + 1):
-            emitted_output = False
-            try:
-                async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
-                    async with client.stream("POST", self.host + "/api/generate", json=payload, headers={"Content-Type": "application/json"}) as response:
-                        if response.status_code >= 400:
-                            error = _ProviderHTTPError(response.status_code)
-                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
-                                continue
-                            yield ModelStreamEvent("error", metadata={"message": f"Ollama request failed with HTTP {response.status_code}: {await response.aread()}"})
-                            return
-                        async for line in response.aiter_lines():
-                            if not line.strip():
-                                continue
-                            data = json.loads(line)
-                            text = data.get("response")
-                            if isinstance(text, str) and text:
-                                emitted_output = True
-                                yield ModelStreamEvent("text_delta", text=text)
-                            if data.get("done"):
-                                metadata = {
-                                    "input_tokens": data.get("prompt_eval_count"),
-                                    "output_tokens": data.get("eval_count"),
-                                    "finish_reason": data.get("done_reason"),
-                                }
-                                self.last_completion_metadata = metadata
-                                yield ModelStreamEvent("completed", metadata=metadata)
-                                return
-                return
-            except (httpx.RequestError, json.JSONDecodeError) as exc:
-                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
-                    continue
-                yield ModelStreamEvent("error", metadata={"message": f"Ollama stream failed: {exc}"})
-                return
-
 
 def _normalize_versioned_base_url(base_url: str) -> str:
     base = str(base_url).rstrip("/")
@@ -266,7 +160,7 @@ def _normalize_versioned_base_url(base_url: str) -> str:
     return base
 
 
-def _extract_openai_text(data: JsonObject) -> str:
+def _extract_openai_text(data: dict[str, Any]) -> str:
     if data.get("output_text"):
         return data["output_text"]
 
@@ -293,7 +187,7 @@ def _extract_openai_text(data: JsonObject) -> str:
     return ""
 
 
-def _extract_openai_response_from_sse(body_text: str) -> tuple[str, JsonObject]:
+def _extract_openai_response_from_sse(body_text: str) -> tuple[str, dict[str, Any]]:
     last_response = None
     deltas = []
     for line in body_text.splitlines():
@@ -334,7 +228,7 @@ def _extract_openai_response_from_sse(body_text: str) -> tuple[str, JsonObject]:
     return "", {}
 
 
-def _extract_usage_cache_details(data: JsonObject) -> JsonObject:
+def _extract_usage_cache_details(data: dict[str, Any]) -> dict[str, Any]:
     # 把不同 OpenAI-compatible 返回里的 usage 字段整理成统一结构，
     # 让 runtime/trace/report 不需要关心 provider 细节。
     usage = data.get("usage") or {}
@@ -353,7 +247,7 @@ def _extract_usage_cache_details(data: JsonObject) -> JsonObject:
     }
 
 
-def _with_anthropic_cache_breakpoints(messages: list[JsonObject]) -> list[JsonObject]:
+def _with_anthropic_cache_breakpoints(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """为最后一个稳定 Anthropic 内容 block 加缓存断点，不修改原始消息。"""
     prepared_messages = copy.deepcopy(messages)
     for message in reversed(prepared_messages):
@@ -390,8 +284,8 @@ class OpenAICompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
-        tools: list[JsonObject] | None = None,
-        input_items: list[JsonObject] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        input_items: list[dict[str, Any]] | None = None,
     ) -> str:
         """向 OpenAI-compatible `/responses` 接口发起一次模型调用。
 
@@ -505,8 +399,8 @@ class OpenAICompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
-        tools: list[JsonObject] | None = None,
-        input_items: list[JsonObject] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        input_items: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """将 OpenAI Responses SSE 事件转换为文本增量和完成元数据。"""
         self.last_completion_metadata = {}
@@ -598,7 +492,7 @@ class OpenAICompatibleModelClient:
                 return
 
 
-def _extract_anthropic_text(data: JsonObject) -> str:
+def _extract_anthropic_text(data: dict[str, Any]) -> str:
     for item in data.get("content", []):
         if isinstance(item, dict) and item.get("type") == "text":
             text = item.get("text")
@@ -627,9 +521,9 @@ class AnthropicCompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
-        tools: list[JsonObject] | None = None,
-        input_items: list[JsonObject] | None = None,
-        system: list[JsonObject] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        input_items: list[dict[str, Any]] | None = None,
+        system: list[dict[str, Any]] | None = None,
     ) -> str:
         """请求一条非流式 Anthropic 兼容完成响应。"""
         del prompt_cache_key, prompt_cache_retention
@@ -691,14 +585,14 @@ class AnthropicCompatibleModelClient:
         max_new_tokens: int,
         prompt_cache_key: str | None = None,
         prompt_cache_retention: str | None = None,
-        tools: list[JsonObject] | None = None,
-        input_items: list[JsonObject] | None = None,
-        system: list[JsonObject] | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        input_items: list[dict[str, Any]] | None = None,
+        system: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[ModelStreamEvent]:
         """将 Anthropic Messages SSE 事件转换为标准化文本增量。"""
         del prompt_cache_key, prompt_cache_retention
         self.last_completion_metadata = {}
-        payload: JsonObject = {
+        payload: dict[str, Any] = {
             "model": self.model,
             "messages": _with_anthropic_cache_breakpoints(input_items) if input_items else [{"role": "user", "content": [{"type": "text", "text": prompt}]}],
             "max_tokens": max_new_tokens,
@@ -713,7 +607,7 @@ class AnthropicCompatibleModelClient:
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
         for attempt in range(MAX_RETRIES + 1):
-            content_blocks: dict[int, JsonObject] = {}
+            content_blocks: dict[int, dict[str, Any]] = {}
             emitted_output = False
             try:
                 async with httpx.AsyncClient(timeout=self.timeout, trust_env=False) as client:
