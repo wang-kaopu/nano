@@ -27,7 +27,6 @@ class ContextManager:
         """组装一轮完整 prompt，并记录各 section 的原始长度。"""
         user_message = str(user_message)
         memory_enabled = self.runtime.feature_enabled("memory")
-        relevant_memory_enabled = self.runtime.feature_enabled("relevant_memory")
         prefix = self.runtime.prefix if include_prefix else ""
         checkpoint_text = self.runtime.render_checkpoint_text().strip()
         if checkpoint_text and include_prefix:

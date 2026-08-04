@@ -16,10 +16,33 @@ from typing import Any, AsyncIterator, Iterable, Mapping
 import httpx
 
 from nano.runtime.query_events import ModelStreamEvent
+from nano.runtime.termination import normalize_termination_reason
 from nano.storage.schemas import AnthropicResponseModel, OpenAIResponseModel
 
 OPENAI_COMPATIBLE_USER_AGENT = "nano/0.1"
 MAX_RETRIES = 3
+
+
+def _completion_termination_metadata(provider_finish_reason: str) -> dict[str, str]:
+    """返回 provider 原始结束原因及运行时统一结束原因。"""
+    return {
+        "provider_finish_reason": provider_finish_reason,
+        "termination_reason": normalize_termination_reason({"provider_finish_reason": provider_finish_reason}),
+    }
+
+
+def _openai_provider_finish_reason(response_data: Mapping[str, Any]) -> str:
+    """从 Responses 或 Chat Completions 兼容响应中提取结束原因。"""
+    status = str(response_data.get("status", "")).strip()
+    if status == "incomplete":
+        details = response_data.get("incomplete_details")
+        if isinstance(details, Mapping):
+            return str(details.get("reason", "incomplete"))
+        return "incomplete"
+    choices = response_data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        return str(choices[0].get("finish_reason", status or "unknown"))
+    return status or "completed"
 
 
 class _ProviderHTTPError(RuntimeError):
@@ -149,7 +172,8 @@ class FakeModelClient:
         chunks = raw if isinstance(raw, list) else [raw]
         for chunk in chunks:
             yield ModelStreamEvent("text_delta", text=str(chunk))
-        yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata or {}))
+        metadata = {"provider_finish_reason": "completed", "termination_reason": "complete", **dict(self.last_completion_metadata or {})}
+        yield ModelStreamEvent("completed", metadata=metadata)
 
 
 
@@ -371,6 +395,7 @@ class OpenAICompatibleModelClient:
                     "prompt_cache_supported": self.supports_prompt_cache,
                     "prompt_cache_key": prompt_cache_key,
                     "prompt_cache_retention": prompt_cache_retention,
+                    **_completion_termination_metadata(_openai_provider_finish_reason(response_data)),
                     **_extract_usage_cache_details(response_data),
                 }
             if text:
@@ -389,6 +414,7 @@ class OpenAICompatibleModelClient:
             "prompt_cache_supported": self.supports_prompt_cache,
             "prompt_cache_key": prompt_cache_key,
             "prompt_cache_retention": prompt_cache_retention,
+            **_completion_termination_metadata(_openai_provider_finish_reason(data)),
             **_extract_usage_cache_details(data),
         }
         return _extract_openai_text(data)
@@ -451,7 +477,7 @@ class OpenAICompatibleModelClient:
                                     saw_delta = True
                                     emitted_output = True
                                     yield ModelStreamEvent("text_delta", text=text)
-                            elif event_type == "response.completed":
+                            elif event_type in {"response.completed", "response.incomplete"}:
                                 response_data = event.get("response") or {}
                                 if not saw_delta:
                                     text = _extract_openai_text(response_data)
@@ -463,6 +489,7 @@ class OpenAICompatibleModelClient:
                                     "prompt_cache_key": prompt_cache_key,
                                     "prompt_cache_retention": prompt_cache_retention,
                                     "response_output": response_data.get("output", []),
+                                    **_completion_termination_metadata(_openai_provider_finish_reason(response_data)),
                                     **_extract_usage_cache_details(response_data),
                                 }
                                 self.last_completion_metadata = metadata
@@ -574,6 +601,8 @@ class AnthropicCompatibleModelClient:
             ) from exc
         if data.get("error"):
             raise RuntimeError(f"Anthropic-compatible error: {data['error']}")
+        provider_finish_reason = str(data.get("stop_reason", ""))
+        self.last_completion_metadata = _completion_termination_metadata(provider_finish_reason)
         text = _extract_anthropic_text(data)
         if text:
             return text
@@ -687,15 +716,19 @@ class AnthropicCompatibleModelClient:
                                     )
                             elif event_type == "message_delta":
                                 usage = event.get("usage") or {}
+                                provider_finish_reason = str(event.get("delta", {}).get("stop_reason", ""))
                                 self.last_completion_metadata.update(
                                     {
                                         "output_tokens": usage.get("output_tokens"),
-                                        "finish_reason": event.get("delta", {}).get("stop_reason"),
+                                        "finish_reason": provider_finish_reason,
+                                        **_completion_termination_metadata(provider_finish_reason),
                                     }
                                 )
                             elif event_type == "message_stop":
                                 ordered_blocks = [content_blocks[index] for index in sorted(content_blocks)]
                                 self.last_completion_metadata["response_output"] = [{"role": "assistant", "content": ordered_blocks}]
+                                self.last_completion_metadata.setdefault("provider_finish_reason", "unknown")
+                                self.last_completion_metadata.setdefault("termination_reason", "unknown")
                                 yield ModelStreamEvent("completed", metadata=dict(self.last_completion_metadata))
                                 return
                             elif event_type == "error":

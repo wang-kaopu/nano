@@ -98,6 +98,12 @@ class QueryEngine:
                     await runtime.wait_for_async_agents()
                     if event.type == "final":
                         final = event.payload["answer"]
+                        task_state.evidence_complete = bool(event.payload.get("evidence_complete", runtime.required_targets_complete()))
+                        task_state.missing_targets = list(event.payload.get("missing_targets", runtime.missing_required_targets()))
+                        task_state.completion_mode = str(event.payload.get("completion_mode", "normal_final"))
+                        task_state.provider_finish_reason = str(event.payload.get("provider_finish_reason", ""))
+                        task_state.termination_reason = str(event.payload.get("termination_reason", ""))
+                        task_state.finalization_error_code = str(event.payload.get("finalization_error_code", ""))
                         runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
                         self._finish_success(task_state, user_message, final, run_started_at)
                         yield event
@@ -111,6 +117,12 @@ class QueryEngine:
                         return
                     if event.type == "stopped":
                         partial_answer = str(event.payload.get("answer", "")).strip()
+                        task_state.evidence_complete = bool(event.payload.get("evidence_complete", False))
+                        task_state.missing_targets = list(event.payload.get("missing_targets", []))
+                        task_state.completion_mode = str(event.payload.get("completion_mode", ""))
+                        task_state.provider_finish_reason = str(event.payload.get("provider_finish_reason", ""))
+                        task_state.termination_reason = str(event.payload.get("termination_reason", ""))
+                        task_state.finalization_error_code = str(event.payload.get("finalization_error_code", ""))
                         if event.payload["reason"] == "retry_limit_reached":
                             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
                             task_state.stop_retry_limit(final)
@@ -123,12 +135,18 @@ class QueryEngine:
                         elif event.payload["reason"] == "approval_denied":
                             final = "Operation was not executed because approval was denied."
                             task_state.stop_approval_denied(final)
+                        elif event.payload["reason"] == "output_limit_reached":
+                            final = partial_answer or "The model output reached its token limit before completing the response."
+                            task_state.stop_output_limit(final)
+                        elif event.payload["reason"] == "forced_final_invalid":
+                            final = partial_answer or "The model attempted to call a tool or returned an invalid response during the final-only phase."
+                            task_state.stop_forced_final_invalid(final)
                         else:
                             final = partial_answer or "Stopped after reaching the step limit without a final answer."
                             task_state.stop_step_limit(final)
                         runtime.record({"role": "assistant", "content": final, "created_at": now()})
                         self._finish_stopped(task_state, user_message, final, run_started_at)
-                        yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
+                        yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final, "evidence_complete": task_state.evidence_complete, "missing_targets": task_state.missing_targets, "finalization_error_code": str(event.payload.get("finalization_error_code", "")), "completion_mode": task_state.completion_mode, "provider_finish_reason": task_state.provider_finish_reason, "termination_reason": task_state.termination_reason})
                         return
                 yield event
         except asyncio.CancelledError:

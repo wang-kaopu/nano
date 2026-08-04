@@ -114,11 +114,11 @@ async for event in run_agent(
 `run_agent` 产出 `QueryEvent`，并始终在独立 asyncio Task 中执行运行循环。`max_turns`
 限制模型循环次数；`use_exact_tools=True` 时严格应用 `AgentDefinition.tools` 白名单。
 
-`delegate` 只接受 `tasks` 数组：运行时先并发启动整批子任务，再等待全部任务进入终态，并返回每项任务的结构化结果。
+`delegate` 只接受 `tasks` 数组：运行时先并发启动整批子任务，再等待全部任务进入终态，并返回每项任务的结构化结果。结果中的 `evidenceComplete` 和 `missingTargets` 表示子任务是否已完整读取必需目标；父 agent 应只补读 `missingTargets` 中的范围，不能因子任务已停止而盲目重读全部文件。
 因此父 agent 在子任务运行期间不会获得下一次模型推理机会，也不会收到 `async_agent_notification` 或经历 `try_final` 等待握手。父请求被中断时，运行时会取消全部未完成子任务。
-主 agent 默认有 12 个成功工具步骤；`max_steps` 只限制工具调用，达到上限后仍会额外请求一次无工具 Final 来总结已有证据。参数校验拒绝不会消耗此预算，但累计 3 次无效工具调用会停止并要求根据最新错误修正操作。
+主 agent 默认有 12 个成功工具步骤；`max_steps` 只限制工具调用，达到上限后仍会额外请求一次无工具 Final 来总结已有证据。普通工具决策默认使用 512 输出 token，Final 使用独立的 2048 token 预算；若普通 Final 因输出上限截断，运行时会无工具重写一次，仍截断则以 `output_limit_reached` 停止。参数校验拒绝不会消耗此预算，但累计 3 次无效工具调用会停止并要求根据最新错误修正操作。
 
-- `explorer`：空会话历史，只暴露只读工具；文件分析任务必须提供 `targets`，运行时会按文件分页规模提高过低的 `requested_max_steps`。
+- `explorer`：空会话历史，只暴露只读工具；文件分析任务必须提供 `targets`。运行时会预登记这些必需目标、把目标元数据注入子任务提示，并按文件分页规模提高过低的 `requested_max_steps`。`list_files` 使用 explorer 独立的五次配额，不消耗常规工具步骤；只有证据完整且最终文本有效、未截断时才会成功。
 - `worker`：空会话历史，必须提供现有目录 `scope`；运行时会新建 detached Git worktree，且只暴露该目录内的文件读写工具。完成通知会给出保留的 worktree 路径。
 - `default`：继承父 agent 的会话、工具白名单、运行配置与主工作区变更锁；`write_file`、`patch_file`、`run_shell` 会与父级及其他 default 子 agent 串行执行。
 

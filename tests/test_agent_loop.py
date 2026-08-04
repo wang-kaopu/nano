@@ -9,6 +9,7 @@ from typing import AsyncIterator
 from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext, build_runtime
 from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import ModelStreamEvent
+from nano.runtime.termination import normalize_termination_reason
 from nano.tools.tool_executor import ToolExecutionResult
 
 
@@ -100,7 +101,13 @@ def test_query_engine_stops_after_three_invalid_tool_calls(tmp_path):
 
 
 def test_delegate_returns_completed_child_result(tmp_path):
-    runtime = build_agent(tmp_path, ["<final>Child investigation complete.</final>"])
+    runtime = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "<final>Child investigation complete.</final>",
+        ],
+    )
 
     async def launch_subagent():
         """执行批量委派并获取子 agent 的同步结果。"""
@@ -119,7 +126,15 @@ def test_delegate_returns_completed_child_result(tmp_path):
 
 
 def test_delegate_does_not_reuse_equivalent_task_specs(tmp_path):
-    runtime = build_agent(tmp_path, ["<final>Child investigation complete.</final>"])
+    runtime = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "<final>Child investigation complete.</final>",
+            '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+            "<final>Child investigation complete.</final>",
+        ],
+    )
 
     async def launch_duplicate_delegates():
         """每次批量委派都创建新的明确子任务集合。"""
@@ -158,7 +173,7 @@ def test_parent_cannot_request_next_model_turn_before_delegate_children_finish(t
                 await self.release_child.wait()
                 text = "<final>Child finished.</final>"
             yield ModelStreamEvent("text_delta", text=text)
-            yield ModelStreamEvent("completed")
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "stop", "termination_reason": "complete"})
 
     runtime = build_agent(tmp_path, [])
     model_client = ParentAndChildModelClient()
@@ -287,6 +302,139 @@ def test_explorer_delegate_budget_is_raised_to_cover_target_pages(tmp_path):
     assert resolved.budget.resolved_max_steps == 4
 
 
+def test_single_file_explorer_budget_keeps_the_minimum_read_budget(tmp_path):
+    """验证单页 explorer 仍保留两次常规工具调用预算。"""
+    runtime = build_agent(tmp_path, [])
+    (tmp_path / ".env").write_text("KEY=value\n", encoding="utf-8")
+
+    resolved = runtime.resolve_delegate_spec({"task": "Read environment", "type": "explorer", "targets": [".env"]})
+
+    assert resolved.budget.estimated_reads == 1
+    assert resolved.budget.minimum_max_steps == 2
+    assert resolved.budget.resolved_max_steps == 2
+
+
+def test_provider_termination_reasons_normalize_output_limits():
+    """验证所有已知输出长度结束原因都会阻止成功收尾。"""
+    assert normalize_termination_reason({"provider_finish_reason": "max_tokens"}) == "output_limit"
+    assert normalize_termination_reason({"provider_finish_reason": "length"}) == "output_limit"
+    assert normalize_termination_reason({"provider_finish_reason": "max_output_tokens"}) == "output_limit"
+    assert normalize_termination_reason({"provider_finish_reason": "stop"}) == "complete"
+
+
+def test_explorer_delegate_reports_complete_evidence_after_forced_final(tmp_path):
+    """验证完整读取后，强制总结仍会作为成功的子任务结果返回。"""
+    (tmp_path / ".env").write_text("KEY=value\n", encoding="utf-8")
+    runtime = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
+            '<tool>{"name":"read_file","args":{"path":".env"}}</tool>',
+            "<final>Environment summary.</final>",
+        ],
+    )
+
+    result = json.loads(asyncio.run(runtime.run_delegates([{"task": "Read environment", "type": "explorer", "targets": [".env"]}])))
+    child = result["children"][0]
+
+    assert child["status"] == "completed"
+    assert child["stopReason"] == "final_answer_returned"
+    assert child["evidenceComplete"] is True
+    assert child["missingTargets"] == []
+    assert child["completionMode"] == "normal_final"
+    assert child["minimumMaxSteps"] == 2
+    assert child["usedToolSteps"] == 1
+    assert child["explorerListFilesCalls"] == 1
+    assert child["explorerListFilesLimit"] == 5
+
+
+def test_explorer_delegate_reports_unread_required_target(tmp_path):
+    """验证未读取的目标会以结构化缺失证据返回父 agent。"""
+    (tmp_path / ".env").write_text("KEY=value\n", encoding="utf-8")
+    runtime = build_agent(
+        tmp_path,
+        [
+            '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
+            "<final>Environment file exists.</final>",
+        ],
+    )
+
+    result = json.loads(asyncio.run(runtime.run_delegates([{"task": "Read environment", "type": "explorer", "targets": [".env"]}])))
+    child = result["children"][0]
+
+    assert child["status"] == "stopped"
+    assert child["evidenceComplete"] is False
+    assert child["missingTargets"] == [{"path": ".env", "exists": True, "kind": "file", "totalLines": 1, "coveredRanges": [], "unreadRanges": [{"start": 1, "end": 1}]}]
+
+
+def test_output_limit_regenerates_a_complete_final_once(tmp_path):
+    """验证普通最终答案被截断后会无工具重写一次。"""
+    class OutputLimitedClient:
+        """先模拟截断，再返回完整最终答案。"""
+
+        model = "output-limit-test"
+        base_url = ""
+        supports_prompt_cache = False
+        supports_native_tool_calls = False
+        native_tool_call_protocol = "openai"
+
+        def __init__(self):
+            self.calls = 0
+            self.last_completion_metadata = {}
+
+        async def stream(self, prompt, max_new_tokens, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                yield ModelStreamEvent("text_delta", text="Partial answer")
+                yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "max_tokens", "termination_reason": "output_limit"})
+                return
+            assert max_new_tokens == 2048
+            yield ModelStreamEvent("text_delta", text="<final>Complete regenerated answer.</final>")
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "stop", "termination_reason": "complete"})
+
+    runtime = build_agent(tmp_path, [])
+    client = OutputLimitedClient()
+    runtime.model_client = client
+
+    assert asyncio.run(runtime.ask_async("Summarize")) == "Complete regenerated answer."
+    assert runtime.current_task_state is not None
+    assert runtime.current_task_state.status == "completed"
+    assert runtime.current_task_state.completion_mode == "output_limit_regenerated"
+    assert runtime.current_task_state.final_regeneration_attempts == 1
+    assert client.calls == 2
+
+
+def test_output_limit_after_regeneration_stops_without_success(tmp_path):
+    """验证最终重写仍截断时不会记录成功状态。"""
+    class AlwaysLimitedClient:
+        """每次请求都返回达到输出上限的部分文本。"""
+
+        model = "always-limited"
+        base_url = ""
+        supports_prompt_cache = False
+        supports_native_tool_calls = False
+        native_tool_call_protocol = "openai"
+
+        def __init__(self):
+            self.calls = 0
+            self.last_completion_metadata = {}
+
+        async def stream(self, prompt, max_new_tokens, **kwargs):
+            self.calls += 1
+            yield ModelStreamEvent("text_delta", text=f"Partial {self.calls}")
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "max_tokens", "termination_reason": "output_limit"})
+
+    runtime = build_agent(tmp_path, [])
+    client = AlwaysLimitedClient()
+    runtime.model_client = client
+
+    assert asyncio.run(runtime.ask_async("Summarize")) == "Partial 2"
+    assert runtime.current_task_state is not None
+    assert runtime.current_task_state.status == "stopped"
+    assert runtime.current_task_state.stop_reason == "output_limit_reached"
+    assert client.calls == 2
+
+
 def test_step_limit_still_requests_one_forced_final_answer(tmp_path):
     """验证 max_steps 只约束工具调用，不占用最后一次总结模型调用。"""
     runtime = build_agent(
@@ -304,7 +452,7 @@ def test_step_limit_still_requests_one_forced_final_answer(tmp_path):
 
     assert answer == "Partial inspection completed; remaining lines were not read."
     assert runtime.current_task_state is not None
-    assert runtime.current_task_state.status == "stopped"
-    assert runtime.current_task_state.stop_reason == "step_limit_reached"
+    assert runtime.current_task_state.status == "completed"
+    assert runtime.current_task_state.stop_reason == "final_answer_returned"
     assert runtime.current_task_state.tool_steps == 3
     assert runtime.current_task_state.attempts == 4

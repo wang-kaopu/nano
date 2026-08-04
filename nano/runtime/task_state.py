@@ -28,6 +28,8 @@ STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
 STOP_REASON_USER_INTERRUPTED = "user_interrupted"
 STOP_REASON_INVALID_TOOL_CALL_LIMIT_REACHED = "invalid_tool_call_limit_reached"
+STOP_REASON_OUTPUT_LIMIT_REACHED = "output_limit_reached"
+STOP_REASON_FORCED_FINAL_INVALID = "forced_final_invalid"
 
 
 class TaskState(BaseModel):
@@ -52,6 +54,14 @@ class TaskState(BaseModel):
     final_answer: str = ""
     checkpoint_id: str = ""
     resume_status: str = ""
+    evidence_complete: bool = False
+    missing_targets: list[dict[str, Any]] = Field(default_factory=list)
+    completion_mode: str = ""
+    provider_finish_reason: str = ""
+    termination_reason: str = ""
+    final_regeneration_attempts: int = Field(default=0, ge=0)
+    finalization_error_code: str = ""
+    explorer_list_files_calls: int = Field(default=0, ge=0)
 
     @classmethod
     def create(cls, task_id: str, user_request: str, run_id: str = "") -> "TaskState":
@@ -120,6 +130,14 @@ class TaskState(BaseModel):
     def stop_invalid_tool_call_limit(self, final_answer: str = "") -> "TaskState":
         """标记运行因连续无效工具调用过多而结束。"""
         return self.stop(STOP_REASON_INVALID_TOOL_CALL_LIMIT_REACHED, final_answer=final_answer)
+
+    def stop_output_limit(self, final_answer: str = "") -> "TaskState":
+        """标记最终输出达到 token 上限。"""
+        return self.stop(STOP_REASON_OUTPUT_LIMIT_REACHED, final_answer=final_answer)
+
+    def stop_forced_final_invalid(self, final_answer: str = "") -> "TaskState":
+        """标记无工具收尾阶段产生了无效响应。"""
+        return self.stop(STOP_REASON_FORCED_FINAL_INVALID, final_answer=final_answer)
 
     def finish_success(self, final_answer: str) -> "TaskState":
         """标记运行成功并保存最终答案。"""

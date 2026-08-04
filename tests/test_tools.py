@@ -85,6 +85,8 @@ def test_delegate_prompt_makes_read_only_work_an_explorer_task():
 
     assert "Submit every currently planned child task in one delegate call" in prompt
     assert "returns only after each child" in prompt
+    assert "evidenceComplete" in prompt
+    assert "missingTargets" in prompt
     assert delegate.concurrency_safe is False
     assert "tasks" in schema["properties"]
     assert "task" not in schema["properties"]

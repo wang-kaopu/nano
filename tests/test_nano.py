@@ -603,6 +603,8 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
                 yield ModelStreamEvent(
                     "completed",
                     metadata={
+                        "provider_finish_reason": "tool_calls",
+                        "termination_reason": "tool_call",
                         "response_output": [
                             {
                                 "type": "function_call",
@@ -619,7 +621,7 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
             assert function_output["call_id"] == "call_read"
             assert json.loads(function_output["output"])["path"] == "README.md"
             yield ModelStreamEvent("text_delta", text="Native result")
-            yield ModelStreamEvent("completed", metadata={"response_output": []})
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "stop", "termination_reason": "complete", "response_output": []})
 
     client = NativeToolClient()
     workspace = build_workspace(tmp_path)
@@ -666,6 +668,8 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
                 yield ModelStreamEvent(
                     "completed",
                     metadata={
+                        "provider_finish_reason": "tool_calls",
+                        "termination_reason": "tool_call",
                         "response_output": [
                             {"type": "function_call", "call_id": "call_list", "name": "list_files", "arguments": "{}"},
                             {"type": "function_call", "call_id": "call_write", "name": "write_file", "arguments": '{"path":"note.txt","content":"done"}'},
@@ -678,7 +682,7 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
             outputs = kwargs["input_items"][-4:]
             assert [item["call_id"] for item in outputs] == ["call_list", "call_write", "call_search", "call_read"]
             yield ModelStreamEvent("text_delta", text="Completed")
-            yield ModelStreamEvent("completed", metadata={"response_output": []})
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "stop", "termination_reason": "complete", "response_output": []})
 
     client = NativeToolClient()
     workspace = build_workspace(tmp_path)
@@ -720,7 +724,7 @@ def test_agent_interrupt_persists_user_interrupted_run(tmp_path):
             assert runtime.interrupt_current_request() is True
             await asyncio.sleep(0)
             yield ModelStreamEvent("text_delta", text="This response must not finish.")
-            yield ModelStreamEvent("completed", metadata={})
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "stop", "termination_reason": "complete"})
 
     workspace = build_workspace(tmp_path)
     runtime = AgentRuntime(

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.runtime.runtime import AgentRuntime
+from nano.tools.tool_context import MAX_EXPLORER_LIST_FILES_CALLS
 from nano.tools.tools import WorkspaceTool, tool_definition
 from nano.utils.text import clip
 
@@ -30,6 +31,8 @@ class ToolExecutionMetadata(BaseModel):
     progress_made: bool = True
     counts_as_tool_step: bool = True
     duplicate_read: bool = False
+    explorer_list_files_calls: int = 0
+    explorer_list_files_limit: int = 0
 
 
 class ToolExecutionResult(BaseModel):
@@ -55,6 +58,8 @@ def _metadata(
     progress_made: bool = True,
     counts_as_tool_step: bool = True,
     duplicate_read: bool = False,
+    explorer_list_files_calls: int = 0,
+    explorer_list_files_limit: int = 0,
 ) -> dict[str, Any]:
     """创建并序列化工具审计元数据。"""
     return ToolExecutionMetadata(
@@ -71,6 +76,8 @@ def _metadata(
         progress_made=progress_made,
         counts_as_tool_step=counts_as_tool_step,
         duplicate_read=duplicate_read,
+        explorer_list_files_calls=explorer_list_files_calls,
+        explorer_list_files_limit=explorer_list_files_limit,
     ).model_dump(mode="python")
 
 
@@ -92,6 +99,12 @@ class ToolExecutor:
         notice = f"\n\nFull result persisted: {artifact_path}"
         preview_limit = max(61, tool.max_result_size_chars - len(notice))
         return clip(content, preview_limit) + notice, artifact_path
+
+    def _explorer_list_files_metadata(self, name: str) -> tuple[bool, int, int]:
+        """返回当前工具是否使用 explorer 的独立目录枚举配额。"""
+        if name != "list_files" or self.runtime.agent_type != "explorer":
+            return True, 0, 0
+        return False, self.runtime.explorer_list_files_calls, MAX_EXPLORER_LIST_FILES_CALLS
 
     def _render_read_file_result(self, content: str, max_result_size_chars: int) -> tuple[str, str]:
         """裁剪 read_file 正文时保留范围、游标和覆盖等分页元数据。"""
@@ -163,6 +176,22 @@ class ToolExecutor:
                     tool_error_code="tool_not_allowed",
                     risk_level="high",
                     read_only=False,
+                ),
+            )
+
+        is_explorer_list_files = name == "list_files" and runtime.agent_type == "explorer"
+        if is_explorer_list_files and runtime.explorer_list_files_calls >= MAX_EXPLORER_LIST_FILES_CALLS:
+            return ToolExecutionResult(
+                content=f"error: explorer list_files limit reached ({MAX_EXPLORER_LIST_FILES_CALLS})",
+                metadata=_metadata(
+                    "rejected",
+                    tool_error_code="explorer_list_files_limit_reached",
+                    risk_level="low",
+                    read_only=True,
+                    progress_made=False,
+                    counts_as_tool_step=False,
+                    explorer_list_files_calls=runtime.explorer_list_files_calls,
+                    explorer_list_files_limit=MAX_EXPLORER_LIST_FILES_CALLS,
                 ),
             )
 
@@ -258,6 +287,11 @@ class ToolExecutor:
                     tool_error_code = "tool_failed"
             runtime.update_memory_after_tool(name, args, content)
             read_status, read_error_code, progress_made, counts_as_tool_step, duplicate_read = self._read_file_execution_flags(content) if tool.name == "read_file" else ("ok", "", True, True, False)
+            if is_explorer_list_files:
+                runtime.explorer_list_files_calls += 1
+                counts_as_tool_step, explorer_list_files_calls, explorer_list_files_limit = self._explorer_list_files_metadata(name)
+            else:
+                explorer_list_files_calls, explorer_list_files_limit = 0, 0
             metadata = _metadata(
                 read_status if tool.name == "read_file" else tool_status,
                 tool_error_code=read_error_code or tool_error_code,
@@ -271,6 +305,8 @@ class ToolExecutor:
                 progress_made=progress_made,
                 counts_as_tool_step=counts_as_tool_step,
                 duplicate_read=duplicate_read,
+                explorer_list_files_calls=explorer_list_files_calls,
+                explorer_list_files_limit=explorer_list_files_limit,
             )
             runtime.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=content, metadata=metadata)

@@ -29,7 +29,7 @@ from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.tool import Tool, ToolProgressData
-from nano.tools.tool_context import FileReadCoverage, ToolContext
+from nano.tools.tool_context import MAX_EXPLORER_LIST_FILES_CALLS, FileReadCoverage, RequiredTargetState, ToolContext
 from nano.types import ModelClient
 from nano.utils.text import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
@@ -48,6 +48,7 @@ READ_FILE_PAGE_LINES = 200
 READ_FILE_PAGE_BYTES = 24_000
 MAX_INITIAL_EXPLORER_STEPS = 8
 MAX_INITIAL_WORKER_STEPS = 10
+MIN_EXPLORER_STEPS = 2
 
 
 @dataclass
@@ -70,6 +71,11 @@ class AsyncAgentTask:
     resolved_max_steps: int = 0
     used_tool_steps: int = 0
     auto_extensions: int = 0
+    explorer_list_files_calls: int = 0
+    evidence_complete: bool = False
+    missing_targets: tuple[dict[str, Any], ...] = ()
+    finalization_error_code: str = ""
+    completion_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -84,13 +90,26 @@ class ResolvedDelegateBudget:
 
 
 @dataclass(frozen=True)
+class ResolvedTarget:
+    """描述 explorer 启动前已解析的必需目标。"""
+
+    path: str
+    exists: bool
+    kind: str
+    total_lines: int | None
+    size_bytes: int | None
+    file_mtime_ns: int | None
+    estimated_reads: int
+
+
+@dataclass(frozen=True)
 class ResolvedDelegateSpec:
     """保存已校验的委派规格及其工具预算。"""
 
     task: str
     agent_type: str
     scope: str
-    targets: tuple[str, ...]
+    targets: tuple[ResolvedTarget, ...]
     budget: ResolvedDelegateBudget
 
 
@@ -105,6 +124,9 @@ class AgentRuntime:
         approval_policy: str = "ask",
         max_steps: int = 12,
         max_new_tokens: int = 512,
+        max_final_tokens: int = 2048,
+        max_final_retries: int = 1,
+        agent_type: str = "root",
         depth: int = 0,
         max_depth: int = 1,
         read_only: bool = False,
@@ -128,16 +150,30 @@ class AgentRuntime:
         self.read_file_state: dict[str, int] = {}
         self.read_coverage_state: dict[str, FileReadCoverage] = {}
         self.read_cursors = {}
+        self.required_targets: dict[str, RequiredTargetState] = {}
+        self.agent_type = str(agent_type)
+        if self.agent_type not in {"root", "explorer", "worker", "default"}:
+            raise ValueError("agent_type must be root, explorer, worker, or default")
+        self.explorer_list_files_calls = 0
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
         # 未显式配置 turn 上限时，保留既有的“允许若干次格式重试”行为。
-        self.max_turns = max(max_steps * 3, max_steps + 4) if max_turns is None else int(max_turns)
+        default_max_turns = max(max_steps * 3, max_steps + 4)
+        if self.agent_type == "explorer":
+            default_max_turns = max(default_max_turns, max_steps + MAX_EXPLORER_LIST_FILES_CALLS + 1)
+        self.max_turns = default_max_turns if max_turns is None else int(max_turns)
         if self.max_steps < 1:
             raise ValueError("max_steps must be at least 1")
         if self.max_turns < 1:
             raise ValueError("max_turns must be at least 1")
         self.max_new_tokens = max_new_tokens
+        self.max_final_tokens = max_final_tokens
+        self.max_final_retries = max_final_retries
+        if self.max_final_tokens < 1:
+            raise ValueError("max_final_tokens must be at least 1")
+        if self.max_final_retries < 0:
+            raise ValueError("max_final_retries must not be negative")
         self.effective_window = MODEL_CONTEXT_WINDOW - CONTEXT_WINDOW_RESERVE
         self.depth = depth
         self.max_depth = max_depth
@@ -576,14 +612,24 @@ class AgentRuntime:
             self.memory.invalidate_file_summary(canonical_path)
 
     def file_coverage_ratio(self) -> float:
-        """返回当前运行时所有已读取文件的总覆盖比例。"""
-        total_lines = sum(item.total_lines for item in self.read_coverage_state.values())
-        covered_lines = sum(sum(end - start + 1 for start, end in item.covered_ranges) for item in self.read_coverage_state.values())
+        """返回必需目标文件的总证据覆盖比例。"""
+        if not self.required_targets:
+            total_lines = sum(item.total_lines for item in self.read_coverage_state.values())
+            covered_lines = sum(sum(end - start + 1 for start, end in item.covered_ranges) for item in self.read_coverage_state.values())
+            return covered_lines / total_lines if total_lines else 0.0
+        targets = [target for target in self.required_targets.values() if target.exists and target.kind == "file" and target.total_lines is not None]
+        total_lines = sum(target.total_lines or 0 for target in targets)
+        covered_lines = sum(target.covered_line_count() for target in targets)
         return covered_lines / total_lines if total_lines else 0.0
 
     def remaining_file_ranges(self) -> list[dict[str, int | str]]:
-        """返回每个已读取文件中已知但尚未覆盖的连续范围。"""
+        """返回必需目标或已读取文件中尚未覆盖的连续范围。"""
         remaining: list[dict[str, int | str]] = []
+        if self.required_targets:
+            for target in self.required_targets.values():
+                for start, end in target.unread_ranges():
+                    remaining.append({"path": target.path, "start": start, "end": end})
+            return remaining
         for coverage in self.read_coverage_state.values():
             cursor = 1
             for start, end in coverage.covered_ranges:
@@ -593,6 +639,41 @@ class AgentRuntime:
             if cursor <= coverage.total_lines:
                 remaining.append({"path": coverage.path, "start": cursor, "end": coverage.total_lines})
         return remaining
+
+    def register_required_targets(self, targets: Iterable[ResolvedTarget]) -> None:
+        """在 explorer 开始前登记必须读取的目标及其证据边界。"""
+        self.required_targets = {
+            target.path: RequiredTargetState(
+                path=target.path,
+                exists=target.exists,
+                kind=target.kind,
+                total_lines=target.total_lines,
+                file_mtime_ns=target.file_mtime_ns,
+            )
+            for target in targets
+        }
+
+    def required_targets_complete(self) -> bool:
+        """判断本次运行的所有必需目标是否都已获得完整证据。"""
+        return all(target.evidence_complete for target in self.required_targets.values())
+
+    def missing_required_targets(self) -> list[dict[str, Any]]:
+        """以稳定结构返回未完成的必需目标及其未读范围。"""
+        missing: list[dict[str, Any]] = []
+        for target in self.required_targets.values():
+            if target.evidence_complete:
+                continue
+            missing.append(
+                {
+                    "path": target.path,
+                    "exists": target.exists,
+                    "kind": target.kind,
+                    "totalLines": target.total_lines,
+                    "coveredRanges": [{"start": start, "end": end} for start, end in target.covered_ranges],
+                    "unreadRanges": [{"start": start, "end": end} for start, end in target.unread_ranges()],
+                }
+            )
+        return missing
 
     def note_tool(self, name, args, result):
         self.update_memory_after_tool(name, args, result)
@@ -727,6 +808,8 @@ class AgentRuntime:
             read_file_state=self.read_file_state,
             read_coverage_state=self.read_coverage_state,
             read_cursors=self.read_cursors,
+            required_targets=self.required_targets,
+            agent_type=self.agent_type,
             permissions=self.permissions,
         )
 
@@ -802,20 +885,39 @@ class AgentRuntime:
     def resolve_delegate_spec(self, raw_spec: Mapping[str, Any]) -> ResolvedDelegateSpec:
         """校验委派规格，并按目标文件大小计算最低工具预算。"""
         spec = toolkit.DelegateTaskSpec.model_validate(raw_spec)
-        targets = tuple(str(target).strip() for target in spec.targets)
-        target_paths = [self.path(target) for target in targets]
-        estimated_reads = 0
+        targets: list[ResolvedTarget] = []
         if spec.type == "explorer":
-            for target_path in target_paths:
+            for raw_target in spec.targets:
+                target_path = self.path(str(raw_target).strip())
+                relative_path = str(target_path.relative_to(self.root))
                 if target_path.is_file():
                     content = target_path.read_bytes()
-                    estimated_reads += max(1, math.ceil((content.count(b"\n") + 1) / READ_FILE_PAGE_LINES), math.ceil(len(content) / READ_FILE_PAGE_BYTES))
+                    total_lines = len(content.splitlines())
+                    estimated_reads = max(1, math.ceil(max(total_lines, 1) / READ_FILE_PAGE_LINES), math.ceil(len(content) / READ_FILE_PAGE_BYTES))
+                    targets.append(
+                        ResolvedTarget(
+                            path=relative_path,
+                            exists=True,
+                            kind="file",
+                            total_lines=total_lines,
+                            size_bytes=len(content),
+                            file_mtime_ns=target_path.stat().st_mtime_ns,
+                            estimated_reads=estimated_reads,
+                        )
+                    )
+                elif target_path.exists():
+                    targets.append(ResolvedTarget(path=relative_path, exists=True, kind="directory" if target_path.is_dir() else "other", total_lines=None, size_bytes=None, file_mtime_ns=target_path.stat().st_mtime_ns, estimated_reads=1))
                 else:
-                    estimated_reads += 1
-            minimum = min(estimated_reads + (1 if len(target_paths) > 1 else 0), MAX_INITIAL_EXPLORER_STEPS)
+                    targets.append(ResolvedTarget(path=relative_path, exists=False, kind="missing", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=1))
+            estimated_reads = sum(target.estimated_reads for target in targets)
+            minimum = min(max(MIN_EXPLORER_STEPS, estimated_reads), MAX_INITIAL_EXPLORER_STEPS)
         elif spec.type == "worker":
+            targets = [ResolvedTarget(path=str(target).strip(), exists=self.path(str(target).strip()).exists(), kind="unknown", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=0) for target in spec.targets]
+            estimated_reads = 0
             minimum = min(6, MAX_INITIAL_WORKER_STEPS)
         else:
+            targets = [ResolvedTarget(path=str(target).strip(), exists=self.path(str(target).strip()).exists(), kind="unknown", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=0) for target in spec.targets]
+            estimated_reads = 0
             minimum = 3
         requested = spec.requested_max_steps
         resolved = max(requested or 0, minimum)
@@ -823,8 +925,8 @@ class AgentRuntime:
             task=spec.task,
             agent_type=spec.type,
             scope=spec.scope.strip(),
-            targets=targets,
-            budget=ResolvedDelegateBudget(requested, minimum, resolved, estimated_reads, {"targets": list(targets), "estimatedReads": estimated_reads}),
+            targets=tuple(targets),
+            budget=ResolvedDelegateBudget(requested, minimum, resolved, estimated_reads, {"targets": [target.path for target in targets], "estimatedReads": estimated_reads}),
         )
 
     async def _delegate_definition(self, async_agent_task_id: str, resolved: ResolvedDelegateSpec) -> Any:
@@ -838,6 +940,9 @@ class AgentRuntime:
             "run_store": self.run_store,
             "max_steps": resolved.budget.resolved_max_steps,
             "max_new_tokens": self.max_new_tokens,
+            "max_final_tokens": self.max_final_tokens,
+            "max_final_retries": self.max_final_retries,
+            "agent_type": agent_type,
             "depth": self.depth + 1,
             "max_depth": self.max_depth,
             "shell_env_allowlist": self.shell_env_allowlist,
@@ -846,7 +951,20 @@ class AgentRuntime:
             "instructions": self.agent_instructions,
         }
         if agent_type == "explorer":
-            return AgentDefinition(workspace=self.workspace, tools=EXPLORER_TOOLS, approval_policy="never", read_only=True, **common)
+            target_lines = ["Required targets:", ""]
+            for target in resolved.targets:
+                target_lines.extend(
+                    [
+                        f"- Path: {target.path}",
+                        f"  Exists: {'true' if target.exists else 'false'}",
+                        f"  Type: {target.kind}",
+                        f"  Total lines: {target.total_lines if target.total_lines is not None else 'unknown'}",
+                        f"  Estimated read pages: {target.estimated_reads}",
+                    ]
+                )
+            target_lines.extend(["", "Read required file targets directly. Do not call list_files merely to verify a target that the runtime already reports as an existing file."])
+            instructions = "\n\n".join(part for part in (self.agent_instructions, "\n".join(target_lines)) if part)
+            return AgentDefinition(workspace=self.workspace, tools=EXPLORER_TOOLS, approval_policy="never", read_only=True, instructions=instructions, required_targets=resolved.targets, **{key: value for key, value in common.items() if key != "instructions"})
         elif agent_type == "worker":
             scope = resolved.scope
             worktree_path = await asyncio.to_thread(self._create_worker_worktree, async_agent_task_id)
@@ -887,6 +1005,10 @@ class AgentRuntime:
         status = "failed"
         error = ""
         stop_reason = ""
+        evidence_complete = False
+        missing_targets: tuple[dict[str, Any], ...] = ()
+        finalization_error_code = ""
+        completion_mode = ""
         try:
             definition = await self._delegate_definition(async_agent_task_id, resolved)
             agent_type = resolved.agent_type
@@ -900,14 +1022,22 @@ class AgentRuntime:
                     status = "completed"
                     answer = str(event.payload.get("answer", ""))
                     stop_reason = "final_answer_returned"
+                    evidence_complete = bool(event.payload.get("evidence_complete", True))
+                    completion_mode = str(event.payload.get("completion_mode", "normal_final"))
                 elif event.type in {"error", "stopped"}:
                     status = "stopped" if event.type == "stopped" else "failed"
                     answer = str(event.payload.get("answer", event.payload.get("message", "")))
                     stop_reason = str(event.payload.get("reason", "model_error"))
+                    evidence_complete = bool(event.payload.get("evidence_complete", False))
+                    missing_targets = tuple(event.payload.get("missing_targets", []))
+                    finalization_error_code = str(event.payload.get("finalization_error_code", ""))
+                    completion_mode = str(event.payload.get("completion_mode", ""))
                 elif event.type == "tool_completed":
                     task = self._async_agent_tasks[async_agent_task_id]
                     if event.payload.get("counts_as_tool_step", True):
                         task.used_tool_steps += 1
+                    if event.payload.get("name") == "list_files" and task.agent_type == "explorer":
+                        task.explorer_list_files_calls = int(event.payload.get("explorer_list_files_calls", task.explorer_list_files_calls))
                 elif event.type == "next_turn" and event.payload.get("reason") == "auto_extension":
                     self._async_agent_tasks[async_agent_task_id].auto_extensions += 1
         except asyncio.CancelledError:
@@ -918,6 +1048,11 @@ class AgentRuntime:
         except Exception as exc:
             error = str(exc)
         finally:
+            task = self._async_agent_tasks[async_agent_task_id]
+            task.evidence_complete = evidence_complete
+            task.missing_targets = missing_targets
+            task.finalization_error_code = finalization_error_code
+            task.completion_mode = completion_mode
             self.complete_agent_task(async_agent_task_id, status, answer, error, stop_reason)
 
     def _create_async_agent_task(self, resolved: ResolvedDelegateSpec) -> str:
@@ -932,7 +1067,7 @@ class AgentRuntime:
                 task_prompt=resolved.task,
                 task=background_task,
                 scope=resolved.scope,
-                targets=resolved.targets,
+                targets=tuple(target.path for target in resolved.targets),
                 requested_max_steps=resolved.budget.requested_max_steps,
                 minimum_max_steps=resolved.budget.minimum_max_steps,
                 resolved_max_steps=resolved.budget.resolved_max_steps,
@@ -943,7 +1078,7 @@ class AgentRuntime:
     def serialize_async_agent_result(self, async_agent_task_id: str) -> dict[str, Any]:
         """将一个已经结束的子任务序列化为 delegate 的稳定结果格式。"""
         task = self._async_agent_tasks[async_agent_task_id]
-        return {"asyncAgentTaskId": task.async_agent_task_id, "type": task.agent_type, "task": task.task_prompt, "targets": list(task.targets), "scope": task.scope, "worktreePath": task.worktree_path, "status": task.status, "stopReason": task.stop_reason, "answer": task.answer, "error": task.error, "requestedMaxSteps": task.requested_max_steps, "minimumMaxSteps": task.minimum_max_steps, "resolvedMaxSteps": task.resolved_max_steps, "usedToolSteps": task.used_tool_steps, "autoExtensions": task.auto_extensions}
+        return {"asyncAgentTaskId": task.async_agent_task_id, "type": task.agent_type, "task": task.task_prompt, "targets": list(task.targets), "scope": task.scope, "worktreePath": task.worktree_path, "status": task.status, "stopReason": task.stop_reason, "answer": task.answer, "error": task.error, "evidenceComplete": task.evidence_complete, "missingTargets": list(task.missing_targets), "finalizationErrorCode": task.finalization_error_code, "completionMode": task.completion_mode, "requestedMaxSteps": task.requested_max_steps, "minimumMaxSteps": task.minimum_max_steps, "resolvedMaxSteps": task.resolved_max_steps, "usedToolSteps": task.used_tool_steps, "autoExtensions": task.auto_extensions, "explorerListFilesCalls": task.explorer_list_files_calls, "explorerListFilesLimit": MAX_EXPLORER_LIST_FILES_CALLS if task.agent_type == "explorer" else 0}
 
     async def run_delegates(self, raw_specs: list[Mapping[str, Any]]) -> str:
         """并发创建全部子 agent，并等待全部任务进入终态。"""

@@ -459,6 +459,12 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     total_lines = len(lines)
+    required_target = context.required_targets.get(str(path.relative_to(context.root)))
+    if required_target is not None and required_target.file_mtime_ns != mtime_ns:
+        # 目标在子 agent 启动后发生变化时，旧的读取证据不能证明当前文件已完整覆盖。
+        required_target.file_mtime_ns = mtime_ns
+        required_target.total_lines = total_lines
+        required_target.covered_ranges = []
     coverage = context.read_coverage_state.get(path_key)
     if coverage is None or coverage.file_mtime_ns != mtime_ns:
         coverage = FileReadCoverage(path=path_key, file_mtime_ns=mtime_ns, total_lines=total_lines)
@@ -487,6 +493,8 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
             else:
                 merged.append((range_start, range_end))
         coverage.covered_ranges = merged
+        if required_target is not None:
+            required_target.record_coverage(returned_start, returned_end)
     coverage.next_start = next_start
     if has_more:
         next_cursor = secrets.token_urlsafe(18)
@@ -682,7 +690,8 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
             "Submit every currently planned child task in one delegate call. The call launches all children concurrently and returns only after each child "
             "finishes, stops, fails, or is cancelled. Explorer tasks that inspect files must include targets. Worker tasks require an existing non-root scope. "
             "requested_max_steps is only a suggestion: the runtime raises it when pagination requires more reads. Default shares the main workspace mutation lock, "
-            "while explorer and worker start with empty history."
+            "while explorer and worker start with empty history. After delegate returns, treat a child answer as complete only when evidenceComplete is true. "
+            "Do not reread targets from children with complete evidence. When evidenceComplete is false, inspect missingTargets and recover only missing targets or unread ranges."
         ),
         runner=None,
         async_runner=tool_delegate,

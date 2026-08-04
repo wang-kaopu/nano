@@ -5,15 +5,31 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from nano.memory import memory as memorylib
 from nano.runtime.query_events import QueryEvent
+from nano.runtime.termination import normalize_termination_reason
 from nano.utils.text import clip, now
 
 
 MICROCOMPACT_IDLE_S = 5 * 60
 MAX_INVALID_TOOL_CALLS = 3
+
+
+@dataclass(frozen=True)
+class FinalizationResult:
+    """描述无工具最终请求的答案有效性和结束状态。"""
+
+    answer: str
+    valid: bool
+    finish_reason: str
+    attempted_tool_call: bool = False
+    truncated: bool = False
+    error_code: str = ""
+    error_message: str = ""
+    provider_finish_reason: str = ""
 
 
 class QueryLoop:
@@ -36,6 +52,8 @@ class QueryLoop:
             return False
         if self.runtime.max_steps >= 10 or not self.runtime.remaining_file_ranges():
             return False
+        if self.runtime.required_targets:
+            return True
         return self.runtime.file_coverage_ratio() >= 0.5
 
     def _apply_auto_extension(self) -> int:
@@ -48,37 +66,65 @@ class QueryLoop:
         self.task_state.auto_extensions += 1
         return extra_steps
 
-    async def _force_finalize(self, native_tool_call_protocol: str, native_input: list[dict[str, Any]]) -> str:
-        """在工具预算耗尽后禁用工具并要求模型基于已有证据总结。"""
-        instruction = (
-            "The tool-call budget is exhausted. Do not request or describe another tool call. "
-            "Return the best final answer using only the information already collected. "
-            "Clearly state any unread ranges, missing evidence, or unfinished work."
-        )
+    async def _run_final_only_request(self, instruction: str, native_tool_call_protocol: str, native_input: list[dict[str, Any]], max_tokens: int) -> FinalizationResult:
+        """发送一次禁用工具的最终请求，并结构化验证其响应。"""
         self.runtime.record({"role": "system", "content": instruction, "created_at": now()})
         self.runtime.record_conversation({"role": "system", "content": instruction, "created_at": now()})
         self.task_state.record_attempt()
         prompt, _ = self.runtime._build_prompt_and_metadata(self.user_message + "\n\n" + instruction, include_prefix=native_tool_call_protocol != "anthropic", relevant_memories=self.injected_memories)
         stream_kwargs: dict[str, Any] = {}
         if self.runtime.model_client.supports_native_tool_calls:
-            stream_kwargs["input_items"] = native_input
+            content_type = "text" if native_tool_call_protocol == "anthropic" else "input_text"
+            final_input = [*native_input, {"role": "user", "content": [{"type": content_type, "text": instruction}]}]
+            stream_kwargs["input_items"] = final_input
             if native_tool_call_protocol == "anthropic":
                 stream_kwargs["system"] = self.runtime.anthropic_system_blocks()
         raw_parts: list[str] = []
-        async for event in self.runtime.model_client.stream(prompt, self.runtime.max_new_tokens, **stream_kwargs):
+        completion_metadata: dict[str, Any] = {}
+        attempted_tool_call = False
+        async for event in self.runtime.model_client.stream(prompt, max_tokens, **stream_kwargs):
             if event.type == "text_delta":
                 raw_parts.append(event.text)
             elif event.type == "tool_call":
-                return "forced_final_invalid: model requested a tool after the tool-call budget was exhausted."
+                attempted_tool_call = True
+            elif event.type == "completed":
+                completion_metadata = dict(event.metadata)
             elif event.type == "error":
-                return f"forced_final_invalid: {event.metadata.get('message', 'model stream failed')}"
-        answer = "".join(raw_parts).strip()
-        if not answer or "<tool" in answer:
-            return "forced_final_invalid: model did not return a valid final answer after the tool-call budget was exhausted."
-        kind, payload = self.runtime.parse(answer)
+                return FinalizationResult(answer="", valid=False, finish_reason="error", error_code="model_error", error_message=str(event.metadata.get("message", "model stream failed")))
+        self.runtime.last_completion_metadata = completion_metadata
+        termination_reason = normalize_termination_reason(completion_metadata)
+        provider_finish_reason = str(completion_metadata.get("provider_finish_reason") or completion_metadata.get("finish_reason") or "")
+        raw_answer = "".join(raw_parts).strip()
+        kind, payload = self.runtime.parse(raw_answer) if raw_answer else ("final", "")
+        answer = str(payload or raw_answer).strip()
         if kind == "tool":
-            return "forced_final_invalid: model requested a tool after the tool-call budget was exhausted."
-        return str(payload or answer).strip()
+            attempted_tool_call = True
+        if attempted_tool_call:
+            return FinalizationResult(answer="", valid=False, finish_reason=termination_reason, attempted_tool_call=True, error_code="tool_requested_during_forced_final", provider_finish_reason=provider_finish_reason)
+        if not answer:
+            return FinalizationResult(answer="", valid=False, finish_reason=termination_reason, error_code="empty_forced_final", provider_finish_reason=provider_finish_reason)
+        if termination_reason == "output_limit":
+            return FinalizationResult(answer=answer, valid=False, finish_reason=termination_reason, truncated=True, error_code="forced_final_output_limit", provider_finish_reason=provider_finish_reason)
+        if termination_reason != "complete":
+            return FinalizationResult(answer=answer, valid=False, finish_reason=termination_reason, error_code="invalid_forced_final_termination", provider_finish_reason=provider_finish_reason)
+        return FinalizationResult(answer=answer, valid=True, finish_reason=termination_reason, provider_finish_reason=provider_finish_reason)
+
+    async def _force_finalize(self, native_tool_call_protocol: str, native_input: list[dict[str, Any]]) -> FinalizationResult:
+        """在工具预算耗尽后，要求模型仅根据已有证据生成最终答案。"""
+        instruction = (
+            "The tool-call budget is exhausted. Do not request or describe any tool call. "
+            "Return the best final answer using only evidence already present in the conversation. "
+            "Explicitly report missing required targets."
+        )
+        return await self._run_final_only_request(instruction, native_tool_call_protocol, native_input, self.runtime.max_final_tokens)
+
+    async def _regenerate_complete_final(self, native_tool_call_protocol: str, native_input: list[dict[str, Any]]) -> FinalizationResult:
+        """在普通 Final 被截断后重新生成一份完整且无工具的答案。"""
+        instruction = (
+            "Your previous final response was truncated by the output-token limit. Regenerate the entire answer from the evidence already present. "
+            "Do not continue from the cut-off text. Produce a complete and concise answer. Do not call tools."
+        )
+        return await self._run_final_only_request(instruction, native_tool_call_protocol, native_input, self.runtime.max_final_tokens)
 
     def _budget_tool_results_anthropic(self, messages: list[dict[str, Any]]) -> None:
         """按上次请求的上下文利用率裁剪 Anthropic 工具结果副本。"""
@@ -381,6 +427,8 @@ class QueryLoop:
                     elif tool_result.metadata.get("counts_as_tool_step", True):
                         self.task_state.record_tool(name)
                     self.task_state.last_tool_made_progress = bool(tool_result.metadata.get("progress_made", True))
+                    if name == "list_files" and self.runtime.agent_type == "explorer":
+                        self.task_state.explorer_list_files_calls = int(tool_result.metadata.get("explorer_list_files_calls", self.task_state.explorer_list_files_calls))
                     if name == "read_file" and tool_result.metadata.get("duplicate_read"):
                         self.task_state.duplicate_read_calls += 1
                     result = tool_result.content
@@ -444,22 +492,44 @@ class QueryLoop:
                 if not final:
                     yield QueryEvent("error", {"message": "native tool-call response completed without text or a function call"})
                     return
-                self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
-                yield QueryEvent("final", {"answer": final})
+                kind, payload = self.runtime.parse(final)
+            else:
+                kind, payload = self.runtime.parse(raw)
+                if kind == "retry":
+                    self.runtime.record({"role": "assistant", "content": payload, "created_at": now()})
+                    self.runtime.record_conversation({"role": "assistant", "content": payload, "created_at": now()})
+                    yield QueryEvent("retry", {"message": payload})
+                    continue
+                final = (payload or raw).strip()
+
+            termination_reason = normalize_termination_reason(completion_metadata)
+            provider_finish_reason = str(completion_metadata.get("provider_finish_reason") or completion_metadata.get("finish_reason") or "")
+            if kind == "tool":
+                yield QueryEvent("stopped", {"reason": "forced_final_invalid", "answer": "", "finalization_error_code": "textual_tool_call_in_final", "provider_finish_reason": provider_finish_reason, "termination_reason": termination_reason})
                 return
-
-            kind, payload = self.runtime.parse(raw)
-            if kind == "retry":
-                self.runtime.record({"role": "assistant", "content": payload, "created_at": now()})
-                self.runtime.record_conversation({"role": "assistant", "content": payload, "created_at": now()})
-                yield QueryEvent("retry", {"message": payload})
-                continue
-
-            final = (payload or raw).strip()
+            if termination_reason == "output_limit":
+                regeneration = FinalizationResult(answer="", valid=False, finish_reason="output_limit", error_code="final_output_limit", provider_finish_reason=provider_finish_reason)
+                for _ in range(self.runtime.max_final_retries):
+                    self.task_state.final_regeneration_attempts += 1
+                    regeneration = await self._regenerate_complete_final(native_tool_call_protocol, native_input)
+                    if regeneration.valid:
+                        final = regeneration.answer
+                        self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
+                        self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
+                        yield QueryEvent("final", {"answer": final, "completion_mode": "output_limit_regenerated", "provider_finish_reason": regeneration.provider_finish_reason, "termination_reason": regeneration.finish_reason})
+                        return
+                final = regeneration.answer or final
+                yield QueryEvent("stopped", {"reason": "output_limit_reached", "answer": final, "finalization_error_code": regeneration.error_code, "provider_finish_reason": regeneration.provider_finish_reason or provider_finish_reason, "termination_reason": regeneration.finish_reason})
+                return
+            if termination_reason != "complete":
+                yield QueryEvent("stopped", {"reason": "forced_final_invalid", "answer": final, "finalization_error_code": "invalid_final_termination", "provider_finish_reason": provider_finish_reason, "termination_reason": termination_reason})
+                return
+            if self.runtime.required_targets and not self.runtime.required_targets_complete():
+                yield QueryEvent("stopped", {"reason": "step_limit_reached", "answer": final, "evidence_complete": False, "missing_targets": self.runtime.missing_required_targets(), "provider_finish_reason": provider_finish_reason, "termination_reason": termination_reason})
+                return
             self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
             self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
-            yield QueryEvent("final", {"answer": final})
+            yield QueryEvent("final", {"answer": final, "completion_mode": "normal_final", "provider_finish_reason": provider_finish_reason, "termination_reason": termination_reason})
             return
 
         if self.task_state.tool_steps >= self.runtime.max_steps:
@@ -473,9 +543,15 @@ class QueryLoop:
                     async for event in self.run(native_input):
                         yield event
                     return
-            partial_answer = await self._force_finalize(native_tool_call_protocol, native_input)
-            self.task_state.final_answer = partial_answer
-            yield QueryEvent("stopped", {"reason": "step_limit_reached", "answer": partial_answer})
+            finalization = await self._force_finalize(native_tool_call_protocol, native_input)
+            self.task_state.final_answer = finalization.answer
+            evidence_complete = self.runtime.required_targets_complete()
+            missing_targets = self.runtime.missing_required_targets()
+            if evidence_complete and finalization.valid and not finalization.truncated:
+                yield QueryEvent("final", {"answer": finalization.answer, "completion_mode": "forced_final", "evidence_complete": True, "provider_finish_reason": finalization.provider_finish_reason, "termination_reason": finalization.finish_reason})
+                return
+            reason = "output_limit_reached" if finalization.truncated else "step_limit_reached" if not evidence_complete else "forced_final_invalid"
+            yield QueryEvent("stopped", {"reason": reason, "answer": finalization.answer, "evidence_complete": evidence_complete, "missing_targets": missing_targets, "finalization_error_code": finalization.error_code, "provider_finish_reason": finalization.provider_finish_reason, "termination_reason": finalization.finish_reason})
         elif self.task_state.attempts >= self.runtime.max_turns:
             yield QueryEvent("stopped", {"reason": "turn_limit_reached"})
         elif self.task_state.attempts >= self.max_attempts and self.task_state.tool_steps < self.runtime.max_steps:

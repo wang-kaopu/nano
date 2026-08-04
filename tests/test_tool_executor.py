@@ -5,7 +5,7 @@ from nano.runtime.task_state import TaskState
 from nano.tools.tool_executor import ToolExecutor, ToolExecutionResult
 
 
-def build_agent(tmp_path):
+def build_agent(tmp_path, **kwargs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
@@ -14,6 +14,7 @@ def build_agent(tmp_path):
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
+        **kwargs,
     )
 
 
@@ -36,6 +37,25 @@ def test_nano_run_tool_keeps_compatibility_metadata(tmp_path):
 
     assert json.loads(content)["path"] == "README.md"
     assert runtime._last_tool_result_metadata["tool_status"] == "ok"
+
+
+def test_explorer_list_files_uses_a_separate_five_call_quota(tmp_path):
+    """验证 explorer 的目录枚举不消耗工具步骤且独立限制为五次。"""
+    runtime = build_agent(tmp_path, agent_type="explorer")
+    executor = ToolExecutor(runtime)
+
+    for call_number in range(1, 6):
+        result = executor.execute("list_files", {"path": "."})
+        assert result.metadata["tool_status"] == "ok"
+        assert result.metadata["counts_as_tool_step"] is False
+        assert result.metadata["explorer_list_files_calls"] == call_number
+        assert result.metadata["explorer_list_files_limit"] == 5
+
+    rejected = executor.execute("list_files", {"path": "."})
+
+    assert rejected.metadata["tool_status"] == "rejected"
+    assert rejected.metadata["tool_error_code"] == "explorer_list_files_limit_reached"
+    assert rejected.metadata["counts_as_tool_step"] is False
 
 
 def test_read_file_artifact_clipping_preserves_pagination_metadata(tmp_path):

@@ -8,7 +8,7 @@ from typing import Any, Iterable, Mapping, TypeAlias
 
 from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import QueryEvent
-from nano.runtime.runtime import AgentRuntime
+from nano.runtime.runtime import AgentRuntime, ResolvedTarget
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.tool_context import ToolContext
@@ -33,6 +33,9 @@ class AgentDefinition:
     approval_policy: str = "ask"
     max_steps: int = 12
     max_new_tokens: int = 512
+    max_final_tokens: int = 2048
+    max_final_retries: int = 1
+    agent_type: str = "root"
     depth: int = 0
     max_depth: int = 1
     read_only: bool = False
@@ -40,6 +43,7 @@ class AgentDefinition:
     secret_env_names: Iterable[str] | None = None
     feature_flags: Mapping[str, bool] | None = None
     workspace_mutation_lock: asyncio.Lock | None = None
+    required_targets: tuple[ResolvedTarget, ...] = ()
 
 
 def _normalize_prompt_messages(prompt_messages: PromptMessage | Iterable[PromptMessage]) -> str:
@@ -72,7 +76,7 @@ def build_runtime(
     max_turns: int | None = None,
 ) -> AgentRuntime:
     """根据对象化配置创建本次运行专属的 AgentRuntime。"""
-    return AgentRuntime(
+    runtime = AgentRuntime(
         model_client=agent_definition.model_client,
         workspace=agent_definition.workspace,
         session_store=agent_definition.session_store,
@@ -81,6 +85,9 @@ def build_runtime(
         approval_policy=agent_definition.approval_policy,
         max_steps=agent_definition.max_steps,
         max_new_tokens=agent_definition.max_new_tokens,
+        max_final_tokens=agent_definition.max_final_tokens,
+        max_final_retries=agent_definition.max_final_retries,
+        agent_type=agent_definition.agent_type,
         depth=agent_definition.depth,
         max_depth=agent_definition.max_depth,
         read_only=agent_definition.read_only,
@@ -94,6 +101,8 @@ def build_runtime(
         agent_instructions=agent_definition.instructions,
         workspace_mutation_lock=agent_definition.workspace_mutation_lock,
     )
+    runtime.register_required_targets(agent_definition.required_targets)
+    return runtime
 
 
 async def run_agent(
