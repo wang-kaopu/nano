@@ -24,7 +24,7 @@ from prompt_toolkit.layout.containers import HSplit
 from prompt_toolkit.shortcuts import CompleteStyle, PromptSession
 from prompt_toolkit.widgets import Dialog, Label, RadioList
 
-from nano.config import load_project_env, provider_env, runtime_limits_from_env
+from nano.config import deepseek_web_search_max_uses_from_env, load_project_env, provider_env, runtime_limits_from_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import QueryEvent
@@ -302,6 +302,7 @@ def _build_model_client(args, provider_max_retries: int | None = None):
         model = _effective_model(args, provider)
         base_url = args.base_url or provider_env("NANO_DEEPSEEK_API_BASE", ("DEEPSEEK_API_BASE",), DEFAULT_DEEPSEEK_BASE_URL)
         api_key = provider_env("NANO_DEEPSEEK_API_KEY", ("DEEPSEEK_API_KEY",))
+        web_search_max_uses = deepseek_web_search_max_uses_from_env()
         return AnthropicCompatibleModelClient(
             model=model,
             base_url=base_url,
@@ -309,6 +310,11 @@ def _build_model_client(args, provider_max_retries: int | None = None):
             temperature=args.temperature,
             timeout=args.openai_timeout,
             max_retries=provider_max_retries,
+            server_tools=(
+                [{"type": "web_search_20250305", "name": "web_search", "max_uses": web_search_max_uses}]
+                if web_search_max_uses
+                else []
+            ),
         )
 
     raise ValueError(f"Unsupported provider: {provider}")

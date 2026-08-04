@@ -264,6 +264,11 @@ class QueryLoop:
                 }
                 for tool in self.runtime.tools.values()
             ]
+            native_tools.extend(
+                tool
+                for tool in getattr(self.runtime.model_client, "native_server_tools", [])
+                if isinstance(tool, dict)
+            )
         else:
             native_tools = [
                 {

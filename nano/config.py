@@ -110,6 +110,11 @@ def runtime_limits_from_env() -> RuntimeLimits:
     return limits
 
 
+def deepseek_web_search_max_uses_from_env() -> int:
+    """读取 DeepSeek 原生网页搜索的单次请求调用上限；设为 0 可关闭搜索。"""
+    return _integer_env("NANO_DEEPSEEK_WEB_SEARCH_MAX_USES", 5, minimum=0)
+
+
 def _strip_quotes(value: str) -> str:
     value = value.strip()
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:

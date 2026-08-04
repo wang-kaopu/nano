@@ -581,6 +581,97 @@ def test_openai_compatible_client_sends_function_tools_and_emits_function_call()
     assert events[1].metadata["response_output"][0]["call_id"] == "call_1"
 
 
+def test_anthropic_compatible_client_preserves_native_web_search_blocks():
+    """服务端搜索结果必须原样保留，供包含后续本地工具调用的会话继续使用。"""
+    class FakeResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aread(self):
+            return b""
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"search_1","name":"web_search","input":{"query":"Python release calendar"},"caller":{"type":"direct"}}}'
+            yield 'data: {"type":"content_block_stop","index":0}'
+            yield 'data: {"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"search_1","content":[{"type":"web_search_result","title":"Python release schedule","url":"https://peps.python.org/","encrypted_content":"encrypted"}]}}'
+            yield 'data: {"type":"content_block_stop","index":1}'
+            yield 'data: {"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}'
+            yield 'data: {"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"<final>Source found.</final>"}}'
+            yield 'data: {"type":"content_block_stop","index":2}'
+            yield 'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}'
+            yield 'data: {"type":"message_stop"}'
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            del kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, *, json, headers):
+            del method, url, json, headers
+            return FakeResponse()
+
+    client = AnthropicCompatibleModelClient(
+        model="deepseek-v4-flash",
+        base_url="https://api.deepseek.com/anthropic",
+        api_key="sk-test",
+        temperature=0.2,
+        timeout=30,
+        server_tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+    )
+
+    with patch("nano.providers.clients.httpx.AsyncClient", FakeAsyncClient):
+        events = asyncio.run(_collect_events(client.stream("hello", 42, tools=client.native_server_tools)))
+
+    assert events[0].type == "text_delta"
+    assert events[0].text == "<final>Source found.</final>"
+    assert events[1].type == "completed"
+    response_output = events[1].metadata["response_output"][0]["content"]
+    assert [block["type"] for block in response_output] == ["server_tool_use", "web_search_tool_result", "text"]
+    assert response_output[1]["content"][0]["encrypted_content"] == "encrypted"
+
+
+def test_native_anthropic_server_tools_are_sent_without_local_execution(tmp_path):
+    """DeepSeek 托管的网页搜索由 provider 执行，运行时不应将其交给本地工具执行器。"""
+    class NativeSearchClient:
+        model = "deepseek-v4-flash"
+        supports_native_tool_calls = True
+        supports_prompt_cache = True
+        native_tool_call_protocol = "anthropic"
+        native_server_tools = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+
+        def __init__(self):
+            self.last_completion_metadata = {}
+            self.requests = []
+
+        async def stream(self, prompt, max_tokens, **kwargs):
+            del prompt, max_tokens
+            self.requests.append(kwargs)
+            assert self.requests[0]["tools"][-1] == self.native_server_tools[0]
+            yield ModelStreamEvent("text_delta", text="Used DeepSeek search.")
+            yield ModelStreamEvent("completed", metadata={"provider_finish_reason": "end_turn", "termination_reason": "complete", "response_output": []})
+
+    client = NativeSearchClient()
+    runtime = AgentRuntime(
+        model_client=client,
+        workspace=build_workspace(tmp_path),
+        session_store=SessionStore(tmp_path / ".nano" / "sessions"),
+        approval_policy="auto",
+    )
+
+    assert run_query(runtime, "Search for current Python releases") == "Used DeepSeek search."
+    assert len(client.requests) == 1
+
+
 def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_path):
     class NativeToolClient:
         model = "native-test"
@@ -1192,7 +1283,21 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-project-deepseek"
+    assert mock_anthropic.call_args.kwargs["server_tools"] == [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
     assert runtime.model_client is fake_client
+
+
+def test_build_agent_can_disable_deepseek_native_web_search(tmp_path):
+    """显式设为 0 时不向 DeepSeek 请求注入网页搜索服务端工具。"""
+    (tmp_path / ".env").write_text("NANO_DEEPSEEK_API_KEY=sk-project-deepseek\nNANO_DEEPSEEK_WEB_SEARCH_MAX_USES=0\n", encoding="utf-8")
+    args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            configure_mock_model_client(mock_anthropic.return_value)
+            nano_pkg.build_agent(args)
+
+    assert mock_anthropic.call_args.kwargs["server_tools"] == []
 
 
 def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):

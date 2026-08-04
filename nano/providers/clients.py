@@ -157,6 +157,7 @@ class FakeModelClient:
         self.supports_prompt_cache = False
         self.supports_native_tool_calls = False
         self.native_tool_call_protocol = "openai"
+        self.native_server_tools: list[dict[str, Any]] = []
         self.last_completion_metadata = {}
 
     def complete(self, prompt: str, max_new_tokens: int, **kwargs: Any) -> str | list[str]:
@@ -303,6 +304,7 @@ class OpenAICompatibleModelClient:
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
         self.supports_native_tool_calls = True
         self.native_tool_call_protocol = "openai"
+        self.native_server_tools: list[dict[str, Any]] = []
         self.last_completion_metadata = {}
 
     def complete(
@@ -535,7 +537,17 @@ def _extract_anthropic_text(data: dict[str, Any]) -> str:
 class AnthropicCompatibleModelClient:
     """通过 Anthropic-compatible Messages API 请求模型。"""
 
-    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float, max_retries: int | None = None) -> None:
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str,
+        temperature: float | None,
+        timeout: float,
+        max_retries: int | None = None,
+        server_tools: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """初始化 Anthropic Messages 客户端及 provider 托管工具定义。"""
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
@@ -547,6 +559,7 @@ class AnthropicCompatibleModelClient:
         self.supports_prompt_cache = True
         self.supports_native_tool_calls = True
         self.native_tool_call_protocol = "anthropic"
+        self.native_server_tools = copy.deepcopy(server_tools or [])
         self.last_completion_metadata = {}
 
     def complete(
@@ -680,16 +693,20 @@ class AnthropicCompatibleModelClient:
                             elif event_type == "content_block_start":
                                 index = int(event.get("index", -1))
                                 block = event.get("content_block") or {}
+                                if not isinstance(block, dict):
+                                    continue
+                                content_blocks[index] = copy.deepcopy(block)
                                 if block.get("type") == "text":
-                                    content_blocks[index] = {"type": "text", "text": str(block.get("text", ""))}
+                                    content_blocks[index]["text"] = str(block.get("text", ""))
                                 elif block.get("type") == "tool_use":
-                                    content_blocks[index] = {
-                                        "type": "tool_use",
-                                        "id": str(block.get("id", "")),
-                                        "name": str(block.get("name", "")),
-                                        "input": block.get("input") if isinstance(block.get("input"), dict) else {},
-                                        "partial_json": "",
-                                    }
+                                    content_blocks[index].update(
+                                        {
+                                            "id": str(block.get("id", "")),
+                                            "name": str(block.get("name", "")),
+                                            "input": block.get("input") if isinstance(block.get("input"), dict) else {},
+                                            "partial_json": "",
+                                        }
+                                    )
                             elif event_type == "content_block_delta":
                                 index = int(event.get("index", -1))
                                 delta = event.get("delta", {})
