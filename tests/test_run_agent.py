@@ -69,7 +69,7 @@ def test_build_runtime_uses_the_supplied_tool_context_and_exact_tool_setting(tmp
         shell_env_provider=lambda: {},
         depth=0,
         max_depth=0,
-        spawn_delegate=lambda args: "unused",
+        run_delegates=lambda specs: "unused",
         interrupt_agents=lambda task_ids: 0,
     )
 

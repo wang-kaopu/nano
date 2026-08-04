@@ -114,20 +114,16 @@ async for event in run_agent(
 `run_agent` 产出 `QueryEvent`，并始终在独立 asyncio Task 中执行运行循环。`max_turns`
 限制模型循环次数；`use_exact_tools=True` 时严格应用 `AgentDefinition.tools` 白名单。
 
-`delegate` 始终以后台任务运行并立刻返回 `{"status":"async_launched","asyncAgentTaskId":"..."}`。
-父 agent 会在子任务结束时收到 `async_agent_notification`，其中包含最终结果；父请求被中断时，
-运行时会先取消全部未完成的子任务。若父 agent 在子任务运行时尝试结束，运行时会发起 `try_final`，
-让模型调用 `interrupt_agents` 取消不再需要的任务，或自动等待完成通知后基于结果生成最终回答。候选回答会保留在会话中；
-等待决策期间仅允许调用 `interrupt_agents`，相同 `type`、`task`、`scope` 的重复委派会返回已有任务状态而不会重复启动。
-主 agent 默认有 12 个成功工具步骤；参数校验拒绝不会消耗此预算，但累计 3 次无效工具调用会停止并要求根据最新错误修正操作。
+`delegate` 只接受 `tasks` 数组：运行时先并发启动整批子任务，再等待全部任务进入终态，并返回每项任务的结构化结果。
+因此父 agent 在子任务运行期间不会获得下一次模型推理机会，也不会收到 `async_agent_notification` 或经历 `try_final` 等待握手。父请求被中断时，运行时会取消全部未完成子任务。
+主 agent 默认有 12 个成功工具步骤；`max_steps` 只限制工具调用，达到上限后仍会额外请求一次无工具 Final 来总结已有证据。参数校验拒绝不会消耗此预算，但累计 3 次无效工具调用会停止并要求根据最新错误修正操作。
 
-- `explorer`：空会话历史，只暴露只读工具。
+- `explorer`：空会话历史，只暴露只读工具；文件分析任务必须提供 `targets`，运行时会按文件分页规模提高过低的 `requested_max_steps`。
 - `worker`：空会话历史，必须提供现有目录 `scope`；运行时会新建 detached Git worktree，且只暴露该目录内的文件读写工具。完成通知会给出保留的 worktree 路径。
 - `default`：继承父 agent 的会话、工具白名单、运行配置与主工作区变更锁；`write_file`、`patch_file`、`run_shell` 会与父级及其他 default 子 agent 串行执行。
 
 ```text
-<tool>{"name":"delegate","args":{"task":"检查认证流程","type":"explorer","max_steps":3}}</tool>
-<tool>{"name":"delegate","args":{"task":"修改认证模块","type":"worker","scope":"nano/runtime","max_steps":6}}</tool>
+<tool>{"name":"delegate","args":{"tasks":[{"task":"检查认证流程","type":"explorer","targets":["nano/runtime"]},{"task":"修改认证模块","type":"worker","scope":"nano/runtime","targets":["nano/runtime"],"requested_max_steps":6}]}}</tool>
 ```
 
 ## 快速开始

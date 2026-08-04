@@ -40,6 +40,11 @@ class TaskState(BaseModel):
     user_request: str
     status: TaskStatus = STATUS_RUNNING
     tool_steps: int = Field(default=0, ge=0)
+    initial_max_steps: int = Field(default=0, ge=0)
+    resolved_max_steps: int = Field(default=0, ge=0)
+    auto_extensions: int = Field(default=0, ge=0)
+    duplicate_read_calls: int = Field(default=0, ge=0)
+    last_tool_made_progress: bool = False
     invalid_tool_calls: int = Field(default=0, ge=0)
     attempts: int = Field(default=0, ge=0)
     last_tool: str = ""

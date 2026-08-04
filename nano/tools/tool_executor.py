@@ -1,6 +1,7 @@
 """Structured tool execution for the agent runtime."""
 
 import asyncio
+import json
 import re
 from typing import Any, Iterable, Mapping
 
@@ -26,6 +27,9 @@ class ToolExecutionMetadata(BaseModel):
     diff_summary: list[str] = Field(default_factory=list)
     workspace_fingerprint: str = ""
     result_artifact_path: str = ""
+    progress_made: bool = True
+    counts_as_tool_step: bool = True
+    duplicate_read: bool = False
 
 
 class ToolExecutionResult(BaseModel):
@@ -48,6 +52,9 @@ def _metadata(
     workspace_fingerprint: str = "",
     diff_summary: Iterable[str] | None = None,
     result_artifact_path: str = "",
+    progress_made: bool = True,
+    counts_as_tool_step: bool = True,
+    duplicate_read: bool = False,
 ) -> dict[str, Any]:
     """创建并序列化工具审计元数据。"""
     return ToolExecutionMetadata(
@@ -61,6 +68,9 @@ def _metadata(
         diff_summary=list(diff_summary or []),
         workspace_fingerprint=workspace_fingerprint,
         result_artifact_path=result_artifact_path,
+        progress_made=progress_made,
+        counts_as_tool_step=counts_as_tool_step,
+        duplicate_read=duplicate_read,
     ).model_dump(mode="python")
 
 
@@ -82,6 +92,37 @@ class ToolExecutor:
         notice = f"\n\nFull result persisted: {artifact_path}"
         preview_limit = max(61, tool.max_result_size_chars - len(notice))
         return clip(content, preview_limit) + notice, artifact_path
+
+    def _render_read_file_result(self, content: str, max_result_size_chars: int) -> tuple[str, str]:
+        """裁剪 read_file 正文时保留范围、游标和覆盖等分页元数据。"""
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            return self._render_result_content(type("Tool", (), {"name": "read_file", "max_result_size_chars": max_result_size_chars})(), content)
+        if len(content) <= max_result_size_chars:
+            return content, ""
+        body = str(payload.get("content", ""))
+        artifact_path = self.runtime.persist_tool_result("read_file", body)
+        payload["content"] = clip(body, min(1_500, max_result_size_chars // 2))
+        payload["contentTruncated"] = True
+        payload["resultArtifactPath"] = artifact_path
+        return json.dumps(payload, ensure_ascii=False), artifact_path
+
+    @staticmethod
+    def _read_file_execution_flags(content: str) -> tuple[str, str, bool, bool, bool]:
+        """从 read_file 结构化状态推导进度和工具预算计数。"""
+        try:
+            status = str(json.loads(content).get("status", "ok"))
+        except (json.JSONDecodeError, AttributeError):
+            return "ok", "", True, True, False
+        if status == "already_covered":
+            duplicate_count = int(json.loads(content).get("duplicateReadCalls", 1))
+            return "ok", "", False, duplicate_count >= 2, True
+        if status == "cursor_stale":
+            return "ok", "", False, False, False
+        if status == "rejected":
+            return "rejected", str(json.loads(content).get("errorCode", "repeated_read_range")), False, False, True
+        return "ok", "", True, True, False
 
     def execute(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
         """执行一次工具调用并返回结构化结果。"""
@@ -125,20 +166,6 @@ class ToolExecutor:
                 ),
             )
 
-        if runtime.awaiting_async_agent_decision and tool.name != "interrupt_agents":
-            return ToolExecutionResult(
-                content=(
-                    "error: background child agents are awaiting a wait-or-interrupt decision; "
-                    "only interrupt_agents is available until you return a final answer to wait for their notifications"
-                ),
-                metadata=_metadata(
-                    "rejected",
-                    tool_error_code="async_agent_waiting",
-                    risk_level="low",
-                    read_only=True,
-                ),
-            )
-
         input_value: Any = None
         try:
             input_value = tool.parse_input(args)
@@ -164,7 +191,7 @@ class ToolExecutor:
                 ),
             )
 
-        if runtime.repeated_tool_call(name, args):
+        if tool.name != "read_file" and runtime.repeated_tool_call(name, args):
             return ToolExecutionResult(
                 content=f"error: repeated identical tool call for {name}; choose a different tool or return a final answer",
                 metadata=_metadata(
@@ -212,7 +239,7 @@ class ToolExecutor:
                 lambda candidate, _: runtime.allowed_tools is None or candidate.name in runtime.allowed_tools or name in runtime.allowed_tools,
                 parent_message,
             )
-            content, result_artifact_path = self._render_result_content(tool, result.content)
+            content, result_artifact_path = self._render_read_file_result(result.content, tool.max_result_size_chars) if tool.name == "read_file" else self._render_result_content(tool, result.content)
             if not content.strip():
                 content = "(no output)"
             after_snapshot = runtime.capture_workspace_snapshot() if not tool.is_read_only(input_value) else before_snapshot
@@ -230,9 +257,10 @@ class ToolExecutor:
                     tool_status = "error"
                     tool_error_code = "tool_failed"
             runtime.update_memory_after_tool(name, args, content)
+            read_status, read_error_code, progress_made, counts_as_tool_step, duplicate_read = self._read_file_execution_flags(content) if tool.name == "read_file" else ("ok", "", True, True, False)
             metadata = _metadata(
-                tool_status,
-                tool_error_code=tool_error_code,
+                read_status if tool.name == "read_file" else tool_status,
+                tool_error_code=read_error_code or tool_error_code,
                 risk_level="high" if not tool.is_read_only(input_value) else "low",
                 read_only=tool.is_read_only(input_value),
                 affected_paths=affected_paths,
@@ -240,6 +268,9 @@ class ToolExecutor:
                 workspace_fingerprint=runtime.workspace.fingerprint(),
                 diff_summary=diff_summary,
                 result_artifact_path=result_artifact_path,
+                progress_made=progress_made,
+                counts_as_tool_step=counts_as_tool_step,
+                duplicate_read=duplicate_read,
             )
             runtime.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=content, metadata=metadata)
@@ -296,7 +327,7 @@ class ToolExecutor:
                 metadata=_metadata("rejected", tool_error_code="invalid_arguments", risk_level="low", read_only=True),
             )
 
-        if runtime.repeated_tool_call(name, args):
+        if tool.name != "read_file" and runtime.repeated_tool_call(name, args):
             return ToolExecutionResult(
                 content=f"error: repeated identical tool call for {name}; choose a different tool or return a final answer",
                 metadata=_metadata("rejected", tool_error_code="repeated_identical_call", risk_level="low", read_only=True),
@@ -313,16 +344,21 @@ class ToolExecutor:
                 lambda candidate, _: runtime.allowed_tools is None or candidate.name in runtime.allowed_tools or name in runtime.allowed_tools,
                 parent_message,
             )
-            content, result_artifact_path = self._render_result_content(tool, result.content)
+            content, result_artifact_path = self._render_read_file_result(result.content, tool.max_result_size_chars) if tool.name == "read_file" else self._render_result_content(tool, result.content)
             if not content.strip():
                 content = "(no output)"
             runtime.update_memory_after_tool(name, args, content)
+            read_status, read_error_code, progress_made, counts_as_tool_step, duplicate_read = self._read_file_execution_flags(content) if tool.name == "read_file" else ("ok", "", True, True, False)
             metadata = _metadata(
-                "ok",
+                read_status,
+                tool_error_code=read_error_code,
                 risk_level="low",
                 read_only=True,
                 workspace_fingerprint=runtime.workspace.fingerprint(),
                 result_artifact_path=result_artifact_path,
+                progress_made=progress_made,
+                counts_as_tool_step=counts_as_tool_step,
+                duplicate_read=duplicate_read,
             )
             runtime.record_process_note_for_tool(name, metadata)
             return ToolExecutionResult(content=content, metadata=metadata)

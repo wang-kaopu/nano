@@ -38,6 +38,8 @@ class QueryEngine:
         memory_prefetch = runtime.start_memory_prefetch(user_message)
 
         task_state = TaskState.create(run_id=runtime.new_run_id(), task_id=runtime.new_task_id(), user_request=user_message)
+        task_state.initial_max_steps = runtime.max_steps
+        task_state.resolved_max_steps = runtime.max_steps
         task_state.resume_status = runtime.resume_state.get("status", CHECKPOINT_NONE_STATUS)
         runtime.current_task_state = task_state
         runtime.current_run_dir = runtime.run_store.start_run(task_state)
@@ -108,6 +110,7 @@ class QueryEngine:
                         yield QueryEvent("error", {"message": final, "answer": final})
                         return
                     if event.type == "stopped":
+                        partial_answer = str(event.payload.get("answer", "")).strip()
                         if event.payload["reason"] == "retry_limit_reached":
                             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
                             task_state.stop_retry_limit(final)
@@ -121,7 +124,7 @@ class QueryEngine:
                             final = "Operation was not executed because approval was denied."
                             task_state.stop_approval_denied(final)
                         else:
-                            final = "Stopped after reaching the step limit without a final answer."
+                            final = partial_answer or "Stopped after reaching the step limit without a final answer."
                             task_state.stop_step_limit(final)
                         runtime.record({"role": "assistant", "content": final, "created_at": now()})
                         self._finish_stopped(task_state, user_message, final, run_started_at)
@@ -140,7 +143,6 @@ class QueryEngine:
             yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
             return
         finally:
-            runtime.awaiting_async_agent_decision = False
             if memory_prefetch is not None and not memory_prefetch.settled:
                 memory_prefetch.task.cancel()
             runtime._current_query_task = None

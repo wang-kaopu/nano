@@ -264,14 +264,12 @@ def test_agent_saves_and_resumes_session(tmp_path):
     assert run_query(resumed, "Continue") == "Resumed."
 
 
-def test_delegate_returns_an_async_launch_and_notifies_parent_on_completion(tmp_path):
+def test_delegate_returns_joined_child_results_without_notification(tmp_path):
     runtime = build_agent(
         tmp_path,
         [
-                '<tool>{"name":"delegate","args":{"task":"inspect README","type":"explorer","max_steps":2}}</tool>',
+                '<tool>{"name":"delegate","args":{"tasks":[{"task":"inspect README","type":"explorer","targets":["README.md"]}]}}</tool>',
                 "<final>Child result.</final>",
-                "<final>Parent incorporated the child result.</final>",
-                "<final>Wait for the child notification.</final>",
                 "<final>Parent incorporated the child result.</final>",
             ],
         )
@@ -281,8 +279,10 @@ def test_delegate_returns_an_async_launch_and_notifies_parent_on_completion(tmp_
     assert answer == "Parent incorporated the child result."
     tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
     delegate_event = next(item for item in tool_events if item["name"] == "delegate")
-    assert json.loads(delegate_event["content"])["status"] == "async_launched"
-    assert any(item["name"] == "async_agent_notification" and "Child result." in item["content"] for item in tool_events)
+    payload = json.loads(delegate_event["content"])
+    assert payload["status"] == "completed"
+    assert payload["children"][0]["answer"] == "Child result."
+    assert not any(item["name"] == "async_agent_notification" for item in tool_events)
 
 
 def test_patch_file_replaces_exact_match(tmp_path):
@@ -617,7 +617,7 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
             function_output = kwargs["input_items"][-1]
             assert function_output["type"] == "function_call_output"
             assert function_output["call_id"] == "call_read"
-            assert "# README.md" in function_output["output"]
+            assert json.loads(function_output["output"])["path"] == "README.md"
             yield ModelStreamEvent("text_delta", text="Native result")
             yield ModelStreamEvent("completed", metadata={"response_output": []})
 

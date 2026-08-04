@@ -27,28 +27,58 @@ class QueryLoop:
         self.memory_prefetch = memory_prefetch
         self.injected_memories = []
         self.max_attempts = max(runtime.max_steps * 3, runtime.max_steps + 4)
-        self.awaiting_async_agent_decision = False
-        self.awaited_async_agent_task_ids: list[str] = []
 
-    async def _defer_try_final(self, answer: str) -> tuple[str, list[dict[str, str]]]:
-        """将有活跃子任务时的 final 转换为中断决策或自动等待。"""
-        if self.awaiting_async_agent_decision:
-            self.runtime.record_async_agent_try_final(answer)
-            await self.runtime.wait_for_async_agents(self.awaited_async_agent_task_ids)
-            self.awaiting_async_agent_decision = False
-            self.runtime.awaiting_async_agent_decision = False
-            self.runtime.record_async_agents_ready_message(self.awaited_async_agent_task_ids)
-            self.awaited_async_agent_task_ids = []
-            return "waited", []
-        active_tasks = self.runtime.active_async_agent_tasks()
-        if not active_tasks:
-            return "", []
-        self.runtime.record_async_agent_try_final(answer)
-        task_details = self.runtime.record_async_agent_waiting_message()
-        self.awaited_async_agent_task_ids = [item["asyncAgentTaskId"] for item in task_details]
-        self.awaiting_async_agent_decision = True
-        self.runtime.awaiting_async_agent_decision = True
-        return "decision", task_details
+    def _should_auto_extend(self) -> bool:
+        """判断已接近完成的子 agent 是否可获得唯一一次预算扩容。"""
+        if self.runtime.depth == 0 or self.task_state.auto_extensions >= 1:
+            return False
+        if not self.task_state.last_tool_made_progress or self.task_state.duplicate_read_calls >= 2:
+            return False
+        if self.runtime.max_steps >= 10 or not self.runtime.remaining_file_ranges():
+            return False
+        return self.runtime.file_coverage_ratio() >= 0.5
+
+    def _apply_auto_extension(self) -> int:
+        """为满足条件的子 agent 增加至多两次工具调用额度。"""
+        extra_steps = min(2, 10 - self.runtime.max_steps)
+        if extra_steps <= 0:
+            return 0
+        self.runtime.max_steps += extra_steps
+        self.task_state.resolved_max_steps = self.runtime.max_steps
+        self.task_state.auto_extensions += 1
+        return extra_steps
+
+    async def _force_finalize(self, native_tool_call_protocol: str, native_input: list[dict[str, Any]]) -> str:
+        """在工具预算耗尽后禁用工具并要求模型基于已有证据总结。"""
+        instruction = (
+            "The tool-call budget is exhausted. Do not request or describe another tool call. "
+            "Return the best final answer using only the information already collected. "
+            "Clearly state any unread ranges, missing evidence, or unfinished work."
+        )
+        self.runtime.record({"role": "system", "content": instruction, "created_at": now()})
+        self.runtime.record_conversation({"role": "system", "content": instruction, "created_at": now()})
+        self.task_state.record_attempt()
+        prompt, _ = self.runtime._build_prompt_and_metadata(self.user_message + "\n\n" + instruction, include_prefix=native_tool_call_protocol != "anthropic", relevant_memories=self.injected_memories)
+        stream_kwargs: dict[str, Any] = {}
+        if self.runtime.model_client.supports_native_tool_calls:
+            stream_kwargs["input_items"] = native_input
+            if native_tool_call_protocol == "anthropic":
+                stream_kwargs["system"] = self.runtime.anthropic_system_blocks()
+        raw_parts: list[str] = []
+        async for event in self.runtime.model_client.stream(prompt, self.runtime.max_new_tokens, **stream_kwargs):
+            if event.type == "text_delta":
+                raw_parts.append(event.text)
+            elif event.type == "tool_call":
+                return "forced_final_invalid: model requested a tool after the tool-call budget was exhausted."
+            elif event.type == "error":
+                return f"forced_final_invalid: {event.metadata.get('message', 'model stream failed')}"
+        answer = "".join(raw_parts).strip()
+        if not answer or "<tool" in answer:
+            return "forced_final_invalid: model did not return a valid final answer after the tool-call budget was exhausted."
+        kind, payload = self.runtime.parse(answer)
+        if kind == "tool":
+            return "forced_final_invalid: model requested a tool after the tool-call budget was exhausted."
+        return str(payload or answer).strip()
 
     def _budget_tool_results_anthropic(self, messages: list[dict[str, Any]]) -> None:
         """按上次请求的上下文利用率裁剪 Anthropic 工具结果副本。"""
@@ -177,7 +207,7 @@ class QueryLoop:
         self.runtime.session_path = self.runtime.session_store.save(self.runtime.session)
         return True
 
-    async def run(self) -> AsyncIterator[QueryEvent]:
+    async def run(self, native_input_seed: list[dict[str, Any]] | None = None) -> AsyncIterator[QueryEvent]:
         """流式处理模型输出和工具执行，并产出查询进度。"""
         native_tool_call_protocol = self.runtime.model_client.native_tool_call_protocol
         native_tool_calls = self.runtime.model_client.supports_native_tool_calls
@@ -202,12 +232,8 @@ class QueryLoop:
                 }
                 for tool in self.runtime.tools.values()
             ]
-        native_input: list[dict[str, Any]] = []
-        while (
-            self.task_state.tool_steps < self.runtime.max_steps
-            and self.task_state.attempts < self.max_attempts
-            and self.task_state.attempts < self.runtime.max_turns
-        ):
+        native_input = native_input_seed if native_input_seed is not None else []
+        while self.task_state.tool_steps < self.runtime.max_steps and self.task_state.attempts < self.max_attempts and self.task_state.attempts < self.runtime.max_turns:
             try:
                 auto_compacted = await self._auto_compact(native_tool_call_protocol)
             except RuntimeError as exc:
@@ -352,8 +378,11 @@ class QueryLoop:
                     tool_status = str(tool_result.metadata.get("tool_status", ""))
                     if tool_status == "rejected":
                         self.task_state.record_invalid_tool(name)
-                    else:
+                    elif tool_result.metadata.get("counts_as_tool_step", True):
                         self.task_state.record_tool(name)
+                    self.task_state.last_tool_made_progress = bool(tool_result.metadata.get("progress_made", True))
+                    if name == "read_file" and tool_result.metadata.get("duplicate_read"):
+                        self.task_state.duplicate_read_calls += 1
                     result = tool_result.content
                     self.runtime.record(
                         {
@@ -415,13 +444,6 @@ class QueryLoop:
                 if not final:
                     yield QueryEvent("error", {"message": "native tool-call response completed without text or a function call"})
                     return
-                try_final_state, active_tasks = await self._defer_try_final(final)
-                if try_final_state:
-                    native_input.clear()
-                    if try_final_state == "decision":
-                        yield QueryEvent("try_final", {"answer": final, "active_async_agents": active_tasks})
-                    yield QueryEvent("next_turn", {"reason": "async_agents_waited" if try_final_state == "waited" else "async_agents_running"})
-                    continue
                 self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
                 self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
                 yield QueryEvent("final", {"answer": final})
@@ -435,18 +457,26 @@ class QueryLoop:
                 continue
 
             final = (payload or raw).strip()
-            try_final_state, active_tasks = await self._defer_try_final(final)
-            if try_final_state:
-                if try_final_state == "decision":
-                    yield QueryEvent("try_final", {"answer": final, "active_async_agents": active_tasks})
-                yield QueryEvent("next_turn", {"reason": "async_agents_waited" if try_final_state == "waited" else "async_agents_running"})
-                continue
             self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
             self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
             yield QueryEvent("final", {"answer": final})
             return
 
-        if self.task_state.attempts >= self.runtime.max_turns:
+        if self.task_state.tool_steps >= self.runtime.max_steps:
+            if self._should_auto_extend():
+                extension = self._apply_auto_extension()
+                if extension:
+                    notice = f"The child-agent tool budget has been extended by {extension} calls because known unread file ranges remain. Continue from the next unread range; no further extension will be granted."
+                    self.runtime.record({"role": "system", "content": notice, "created_at": now()})
+                    self.runtime.record_conversation({"role": "system", "content": notice, "created_at": now()})
+                    yield QueryEvent("next_turn", {"reason": "auto_extension", "extra_steps": extension})
+                    async for event in self.run(native_input):
+                        yield event
+                    return
+            partial_answer = await self._force_finalize(native_tool_call_protocol, native_input)
+            self.task_state.final_answer = partial_answer
+            yield QueryEvent("stopped", {"reason": "step_limit_reached", "answer": partial_answer})
+        elif self.task_state.attempts >= self.runtime.max_turns:
             yield QueryEvent("stopped", {"reason": "turn_limit_reached"})
         elif self.task_state.attempts >= self.max_attempts and self.task_state.tool_steps < self.runtime.max_steps:
             yield QueryEvent("stopped", {"reason": "retry_limit_reached"})

@@ -251,7 +251,7 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     assert runtime.tool_run_shell.__func__.__module__ == "nano.runtime.runtime"
 
     with patch("nano.tools.tools.tool_delegate", new=AsyncMock(return_value="toolkit-delegate")) as fake_delegate:
-        delegate_result = asyncio.run(runtime.tool_delegate({"task": "inspect README.md", "max_steps": 2}))
+        delegate_result = asyncio.run(runtime.tool_delegate({"tasks": [{"task": "inspect README.md", "type": "explorer", "targets": ["README.md"]}]}))
 
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
@@ -261,7 +261,7 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
     runtime = build_agent(tmp_path, [], depth=1, max_depth=1)
 
     try:
-        runtime.validate_tool("delegate", {"task": "inspect README.md", "max_steps": 2})
+        runtime.validate_tool("delegate", {"tasks": [{"task": "inspect README.md", "type": "explorer", "targets": ["README.md"]}]})
     except ValueError as exc:
         assert "delegate depth exceeded" in str(exc)
     else:
@@ -273,7 +273,7 @@ def test_explorer_delegate_child_is_read_only(tmp_path):
     runtime = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"write a file","type":"explorer","max_steps":2}}</tool>',
+            '<tool>{"name":"delegate","args":{"tasks":[{"task":"write a file","type":"explorer","targets":["README.md"]}]}}</tool>',
             '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
             "<final>parent done</final>",
             "<final>explorer done</final>",
@@ -284,12 +284,12 @@ def test_explorer_delegate_child_is_read_only(tmp_path):
 
     result = asyncio.run(runtime.ask_async("Delegate the work"))
 
-    assert result == "parent done"
+    assert result == "explorer done"
     assert not target.exists()
     tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
     delegate_event = next(item for item in tool_events if item["name"] == "delegate")
-    assert '"status": "async_launched"' in delegate_event["content"]
-    assert any(item["name"] == "async_agent_notification" for item in tool_events)
+    assert '"status": "completed"' in delegate_event["content"]
+    assert not any(item["name"] == "async_agent_notification" for item in tool_events)
 
 
 def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):

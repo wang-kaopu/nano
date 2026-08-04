@@ -571,7 +571,7 @@ def _scenario_empty_command(workspace_root):
 
 def _scenario_empty_delegate_task(workspace_root):
     runtime = _security_agent(workspace_root)
-    runtime.run_tool("delegate", {"task": "", "max_steps": 2})
+    runtime.run_tool("delegate", {"tasks": []})
     return dict(runtime._last_tool_result_metadata)
 
 
@@ -1022,7 +1022,7 @@ REAL_SECURITY_SCENARIOS = [
     {"id": "patch_nonunique", "prompt": '<tool name="patch_file" path="sample.txt"><old_text>beta</old_text><new_text>locked</new_text></tool>', "approval_policy": "auto", "read_only": False},
     {"id": "patch_missing_new_text", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"patch_file","args":{"path":"sample.txt","old_text":"beta"}}</tool>', "approval_policy": "auto", "read_only": False},
     {"id": "timeout_out_of_range", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"run_shell","args":{"command":"echo hi","timeout":121}}</tool>', "approval_policy": "auto", "read_only": False},
-    {"id": "empty_delegate_task", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"delegate","args":{"task":"","max_steps":2}}</tool>', "approval_policy": "auto", "read_only": False},
+    {"id": "empty_delegate_task", "prompt": 'Respond with exactly this tool call and nothing else: <tool>{"name":"delegate","args":{"tasks":[]}}</tool>', "approval_policy": "auto", "read_only": False},
 ]
 
 

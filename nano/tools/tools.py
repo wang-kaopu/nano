@@ -5,6 +5,7 @@
 """
 
 import json
+import secrets
 import shutil
 import subprocess
 import textwrap
@@ -13,7 +14,7 @@ from typing import Annotated, Any, Callable, Literal, Mapping, Type
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from nano.tools.tool import CanUseTool, PermissionResult, ProgressCallback, Tool, ToolProgressData, ToolResult
-from nano.tools.tool_context import ToolContext
+from nano.tools.tool_context import FileReadCoverage, FileReadCursor, ToolContext
 from nano.tools.shell_risk import ShellCommandParseError, shell_command_segments
 from nano.permissions import PERMISSIONS_FILE_NAME
 from nano.skills import execute_skill
@@ -40,12 +41,22 @@ class ReadFileArguments(ToolArguments):
     """读取文件所需的参数。"""
 
     path: NonEmptyText
-    start: int = Field(default=1, ge=1)
-    end: int = Field(default=200, ge=1)
+    start: int | None = Field(default=None, ge=1)
+    end: int | None = Field(default=None, ge=1)
+    cursor: str = ""
+    page_size: int = Field(default=200, ge=1, le=500)
 
     @model_validator(mode="after")
     def validate_line_range(self) -> "ReadFileArguments":
-        """确保结束行不早于起始行。"""
+        """确保游标模式和显式范围模式不会混用。"""
+        if self.cursor:
+            if self.start is not None or self.end is not None:
+                raise ValueError("cursor cannot be combined with start or end")
+            return self
+        if self.start is None:
+            self.start = 1
+        if self.end is None:
+            self.end = self.start + self.page_size - 1
         if self.end < self.start:
             raise ValueError("end must be greater than or equal to start")
         return self
@@ -89,8 +100,8 @@ class PatchFileArguments(ToolArguments):
     new_text: str
 
 
-class DelegateArguments(ToolArguments):
-    """异步委派子任务所需的参数。"""
+class DelegateTaskSpec(ToolArguments):
+    """描述一个需要由子 agent 完成的明确任务。"""
 
     task: NonEmptyText
     type: Literal["explorer", "worker", "default"] = Field(
@@ -101,7 +112,14 @@ class DelegateArguments(ToolArguments):
         default="",
         description="Only for worker: an existing non-root directory such as 'nano/runtime', never a file name or a natural-language task description.",
     )
-    max_steps: int = Field(default=3, ge=1)
+    targets: list[NonEmptyText] = Field(default_factory=list)
+    requested_max_steps: int | None = Field(default=None, ge=1)
+
+
+class DelegateArguments(ToolArguments):
+    """批量委派并结构化等待子任务所需的参数。"""
+
+    tasks: list[DelegateTaskSpec] = Field(min_length=1, max_length=8)
 
 
 class InterruptAgentsArguments(ToolArguments):
@@ -271,7 +289,7 @@ TOOL_EXAMPLES = {
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","type":"explorer","max_steps":3}}</tool>',
+    "delegate": '<tool>{"name":"delegate","args":{"tasks":[{"task":"inspect README.md","type":"explorer","targets":["README.md"]}]}}</tool>',
     "interrupt_agents": '<tool>{"name":"interrupt_agents","args":{"async_agent_task_ids":["task-id"]}}</tool>',
     "skill": '<tool>{"name":"skill","args":{"skill_name":"commit","args":"stage the current changes"}}</tool>',
 }
@@ -307,9 +325,9 @@ def _validate_workspace_input(context: ToolContext, name: str, args: ToolArgumen
         path = context.path(args["path"])
         if not path.is_file():
             raise ValueError("path is not a file")
-        start = int(args.get("start", 1))
-        end = int(args.get("end", 200))
-        if start < 1 or end < start:
+        start = args.get("start")
+        end = args.get("end")
+        if not args.get("cursor") and (start is None or end is None or int(start) < 1 or int(end) < int(start)):
             raise ValueError("invalid line range")
         return
 
@@ -367,18 +385,25 @@ def _validate_workspace_input(context: ToolContext, name: str, args: ToolArgumen
         return
 
     if name == "delegate":
-        task = str(args.get("task", "")).strip()
-        if not task:
-            raise ValueError("task must not be empty")
         if context.depth >= context.max_depth:
             raise ValueError("delegate depth exceeded")
-        if str(args.get("type", "default")) == "worker":
-            scope = str(args.get("scope", "")).strip()
-            if not scope or scope == ".":
-                raise ValueError("worker delegate requires an existing non-root directory; reading files must use type=explorer without scope")
-            scope_path = context.path(scope)
-            if not scope_path.is_dir():
-                raise ValueError("worker scope must be an existing directory; reading files must use type=explorer without scope")
+        for task_spec in args.get("tasks", []):
+            task = str(task_spec.get("task", "")).strip()
+            if not task:
+                raise ValueError("delegate task must not be empty")
+            agent_type = str(task_spec.get("type", "default"))
+            targets = task_spec.get("targets", [])
+            if agent_type == "explorer" and not targets:
+                raise ValueError("explorer delegate requires targets")
+            if agent_type != "worker" and str(task_spec.get("scope", "")).strip():
+                raise ValueError("delegate scope is only supported for worker tasks")
+            if agent_type == "worker":
+                scope = str(task_spec.get("scope", "")).strip()
+                if not scope or scope == ".":
+                    raise ValueError("worker delegate requires an existing non-root directory")
+                scope_path = context.path(scope)
+                if not scope_path.is_dir():
+                    raise ValueError("worker scope must be an existing directory")
         return
 
     if name == "interrupt_agents":
@@ -410,20 +435,67 @@ def tool_list_files(context: ToolContext, args: ToolArgumentsPayload) -> str:
 
 
 def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
+    """读取文件的一页，并返回范围、覆盖和下一页游标的结构化信息。"""
     path = context.path(args["path"])
     if not path.is_file():
         raise ValueError("path is not a file")
-    start = int(args.get("start", 1))
-    end = int(args.get("end", 200))
+    path_key = str(path)
+    mtime_ns = path.stat().st_mtime_ns
+    page_size = int(args.get("page_size", 200))
+    cursor = str(args.get("cursor", ""))
+    if cursor:
+        cursor_state = context.read_cursors.get(cursor)
+        if cursor_state is None or cursor_state.path != path_key:
+            return json.dumps({"status": "cursor_stale", "path": str(path.relative_to(context.root)), "message": "The file changed after the previous read. Start a new read sequence."}, ensure_ascii=False)
+        if cursor_state.file_mtime_ns != mtime_ns:
+            return json.dumps({"status": "cursor_stale", "path": str(path.relative_to(context.root)), "message": "The file changed after the previous read. Start a new read sequence."}, ensure_ascii=False)
+        start = cursor_state.next_start
+        page_size = cursor_state.page_size
+        end = start + page_size - 1
+    else:
+        start = int(args.get("start") or 1)
+        end = int(args.get("end") or start + page_size - 1)
     if start < 1 or end < start:
         raise ValueError("invalid line range")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    total_lines = len(lines)
+    coverage = context.read_coverage_state.get(path_key)
+    if coverage is None or coverage.file_mtime_ns != mtime_ns:
+        coverage = FileReadCoverage(path=path_key, file_mtime_ns=mtime_ns, total_lines=total_lines)
+        context.read_coverage_state[path_key] = coverage
+    returned_start = min(start, total_lines + 1)
+    returned_end = min(end, total_lines)
+    next_start = min(end + 1, total_lines + 1)
+    next_cursor = ""
+    has_more = next_start <= total_lines
+    is_already_covered = any(existing_start <= returned_start and returned_end <= existing_end for existing_start, existing_end in coverage.covered_ranges)
+    if total_lines and returned_start <= returned_end and is_already_covered:
+        coverage.duplicate_requests += 1
+        if coverage.duplicate_requests >= 3:
+            return json.dumps({"status": "rejected", "errorCode": "repeated_read_range", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
+        next_cursor = secrets.token_urlsafe(18) if has_more else ""
+        if next_cursor:
+            context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, page_size, mtime_ns)
+        return json.dumps({"status": "already_covered", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "nextRange": {"start": next_start, "end": min(next_start + page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+    if total_lines and returned_start <= returned_end:
+        ranges = sorted([*coverage.covered_ranges, (returned_start, returned_end)])
+        merged: list[tuple[int, int]] = []
+        for range_start, range_end in ranges:
+            if merged and range_start <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], range_end))
+            else:
+                merged.append((range_start, range_end))
+        coverage.covered_ranges = merged
+    coverage.next_start = next_start
+    if has_more:
+        next_cursor = secrets.token_urlsafe(18)
+        context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, page_size, mtime_ns)
     try:
-        context.read_file_state[str(path)] = path.stat().st_mtime_ns // 1_000_000
+        context.read_file_state[str(path)] = mtime_ns // 1_000_000
     except OSError:
         pass
-    return f"# {path.relative_to(context.root)}\n{body}"
+    return json.dumps({"status": "ok", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "returnedRange": {"start": returned_start, "end": returned_end}, "totalLines": total_lines, "hasMore": has_more, "nextRange": {"start": next_start, "end": min(next_start + page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "contentTruncated": False, "resultArtifactPath": "", "content": body}, ensure_ascii=False)
 
 
 def tool_search(context: ToolContext, args: ToolArgumentsPayload) -> str:
@@ -519,13 +591,11 @@ def tool_patch_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
 
 
 async def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
-    """登记后台子 agent，并立即返回其任务标识。"""
+    """并发执行全部子任务，并在所有子任务结束后返回。"""
     if context.depth >= context.max_depth:
         raise ValueError("delegate depth exceeded")
-    task = str(args.get("task", "")).strip()
-    if not task:
-        raise ValueError("task must not be empty")
-    return await context.spawn_delegate(args)
+    tasks = list(args["tasks"])
+    return await context.run_delegates(tasks)
 
 
 async def tool_interrupt_agents(context: ToolContext, args: ToolArgumentsPayload) -> str:
@@ -557,8 +627,8 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
     WorkspaceTool(
         name="read_file",
         input_schema=ReadFileArguments,
-        description_text="Read a UTF-8 file by line range.",
-        prompt_text="Use read_file before modifying an existing file; it records the version that may be edited.",
+        description_text="Read a UTF-8 file by range or opaque cursor and return pagination metadata.",
+        prompt_text="Use read_file before modifying an existing file. Prefer its nextCursor for pagination; do not reread covered ranges.",
         runner=tool_read_file,
         read_only=True,
         concurrency_safe=True,
@@ -607,20 +677,12 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
     WorkspaceTool(
         name="delegate",
         input_schema=DelegateArguments,
-        description_text="Launch an asynchronous explorer, worker, or default child agent.",
+        description_text="Launch all child agents concurrently and wait for every child to reach a terminal state.",
         prompt_text=(
-            "Use delegate to launch background work. Choose every parameter before calling it. type=explorer is mandatory for reading files, searching, "
-            "reviewing, or collecting facts; explorer has empty history and never uses scope. type=worker is only for modifying code in an isolated "
-            "worktree; scope must be an existing non-root directory such as 'nano/runtime', never '.', a file path, or a task sentence. type=default is "
-            "only for work that requires this agent's full context and tool access. Set max_steps from the child task: use 3 for one short file read; use 4 "
-            "when a file may need multiple reads or existence checking; use 5 for multi-file investigation or search; use 6 or more for scoped code changes "
-            "and verification. Do not use max_steps 1 or 2 when the child must inspect and report. Examples: read README.md completely => explorer, "
-            "max_steps=4; read .env if it exists => explorer, max_steps=4; read pyproject.toml => explorer, max_steps=3; modify nano/runtime => worker, "
-            "scope='nano/runtime', max_steps=6. After all planned delegate calls return async_launched, your next response must be final and say that you "
-            "are waiting for the listed child agents. The runtime will convert that final into automatic waiting and then deliver completion notifications in "
-            "a new model turn. Never poll child status with run_shell, sleep, ls, find, cat, Python, or by inspecting .nano/runs. Do not launch duplicate "
-            "delegates while waiting. Call interrupt_agents only when a child result is no longer useful. Once notifications arrive, summarize their results "
-            "for the user in final. Default shares the main workspace mutation lock, while explorer and worker start with empty history."
+            "Submit every currently planned child task in one delegate call. The call launches all children concurrently and returns only after each child "
+            "finishes, stops, fails, or is cancelled. Explorer tasks that inspect files must include targets. Worker tasks require an existing non-root scope. "
+            "requested_max_steps is only a suggestion: the runtime raises it when pagination requires more reads. Default shares the main workspace mutation lock, "
+            "while explorer and worker start with empty history."
         ),
         runner=None,
         async_runner=tool_delegate,

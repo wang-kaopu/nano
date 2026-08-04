@@ -8,6 +8,7 @@ import asyncio
 import copy
 import json
 import hashlib
+import math
 import os
 import re
 import subprocess
@@ -28,7 +29,7 @@ from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.tool import Tool, ToolProgressData
-from nano.tools.tool_context import ToolContext
+from nano.tools.tool_context import FileReadCoverage, ToolContext
 from nano.types import ModelClient
 from nano.utils.text import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
@@ -43,6 +44,10 @@ MODEL_CONTEXT_WINDOW = 1_000_000
 CONTEXT_WINDOW_RESERVE = 20_000
 EXPLORER_TOOLS = ("list_files", "read_file", "search", "skill")
 WORKER_TOOLS = ("list_files", "read_file", "search", "write_file", "patch_file")
+READ_FILE_PAGE_LINES = 200
+READ_FILE_PAGE_BYTES = 24_000
+MAX_INITIAL_EXPLORER_STEPS = 8
+MAX_INITIAL_WORKER_STEPS = 10
 
 
 @dataclass
@@ -50,15 +55,43 @@ class AsyncAgentTask:
     """描述父 agent 注册的一条后台委派任务。"""
 
     async_agent_task_id: str
-    signature: str
     agent_type: str
     task_prompt: str
     task: asyncio.Task[Any]
     scope: str = ""
+    targets: tuple[str, ...] = ()
     worktree_path: str = ""
     status: str = "running"
     answer: str = ""
     error: str = ""
+    stop_reason: str = ""
+    requested_max_steps: int | None = None
+    minimum_max_steps: int = 0
+    resolved_max_steps: int = 0
+    used_tool_steps: int = 0
+    auto_extensions: int = 0
+
+
+@dataclass(frozen=True)
+class ResolvedDelegateBudget:
+    """保存父任务建议值与运行时计算出的子任务工具预算。"""
+
+    requested_max_steps: int | None
+    minimum_max_steps: int
+    resolved_max_steps: int
+    estimated_reads: int
+    reason: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ResolvedDelegateSpec:
+    """保存已校验的委派规格及其工具预算。"""
+
+    task: str
+    agent_type: str
+    scope: str
+    targets: tuple[str, ...]
+    budget: ResolvedDelegateBudget
 
 
 class AgentRuntime:
@@ -93,6 +126,8 @@ class AgentRuntime:
         self.root = Path(workspace.repo_root)
         self.permissions = load_project_permissions(self.root)
         self.read_file_state: dict[str, int] = {}
+        self.read_coverage_state: dict[str, FileReadCoverage] = {}
+        self.read_cursors = {}
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
@@ -146,8 +181,6 @@ class AgentRuntime:
         self._current_query_task: asyncio.Task[Any] | None = None
         self._active_tool_tasks = set()
         self._async_agent_tasks: dict[str, AsyncAgentTask] = {}
-        self._async_agent_task_ids_by_signature: dict[str, str] = {}
-        self.awaiting_async_agent_decision = False
         self.last_input_token_count = int(self.session.get("last_input_token_count", 0))
         self.last_api_call_time = 0.0
         self.last_prompt_metadata = {}
@@ -542,6 +575,25 @@ class AgentRuntime:
         elif name in {"write_file", "patch_file"}:
             self.memory.invalidate_file_summary(canonical_path)
 
+    def file_coverage_ratio(self) -> float:
+        """返回当前运行时所有已读取文件的总覆盖比例。"""
+        total_lines = sum(item.total_lines for item in self.read_coverage_state.values())
+        covered_lines = sum(sum(end - start + 1 for start, end in item.covered_ranges) for item in self.read_coverage_state.values())
+        return covered_lines / total_lines if total_lines else 0.0
+
+    def remaining_file_ranges(self) -> list[dict[str, int | str]]:
+        """返回每个已读取文件中已知但尚未覆盖的连续范围。"""
+        remaining: list[dict[str, int | str]] = []
+        for coverage in self.read_coverage_state.values():
+            cursor = 1
+            for start, end in coverage.covered_ranges:
+                if cursor < start:
+                    remaining.append({"path": coverage.path, "start": cursor, "end": start - 1})
+                cursor = max(cursor, end + 1)
+            if cursor <= coverage.total_lines:
+                remaining.append({"path": coverage.path, "start": cursor, "end": coverage.total_lines})
+        return remaining
+
     def note_tool(self, name, args, result):
         self.update_memory_after_tool(name, args, result)
 
@@ -670,9 +722,11 @@ class AgentRuntime:
             shell_env_provider=self.shell_env,
             depth=self.depth,
             max_depth=self.max_depth,
-            spawn_delegate=self.spawn_delegate,
+            run_delegates=self.run_delegates,
             interrupt_agents=self.interrupt_async_agents,
             read_file_state=self.read_file_state,
+            read_coverage_state=self.read_coverage_state,
+            read_cursors=self.read_cursors,
             permissions=self.permissions,
         )
 
@@ -682,39 +736,16 @@ class AgentRuntime:
             raise ValueError(f"async agent task '{async_agent_task_id}' is already registered")
         self._async_agent_tasks[async_agent_task_id] = task
 
-    def complete_agent_task(self, async_agent_task_id: str, status: str, answer: str = "", error: str = "") -> AsyncAgentTask:
-        """记录后台 agent 的终态，供通知和后续查询使用。"""
+    def complete_agent_task(self, async_agent_task_id: str, status: str, answer: str = "", error: str = "", stop_reason: str = "") -> AsyncAgentTask:
+        """记录子 agent 的终态，供 delegate 的结构化结果使用。"""
         task = self._async_agent_tasks.get(async_agent_task_id)
         if task is None:
             raise ValueError(f"async agent task '{async_agent_task_id}' is not registered")
         task.status = status
         task.answer = answer
         task.error = error
+        task.stop_reason = stop_reason
         return task
-
-    def enqueue_agent_notification(self, async_agent_task_id: str) -> None:
-        """将后台 agent 的完成结果写入父 agent 的下一轮可见上下文。"""
-        task = self._async_agent_tasks.get(async_agent_task_id)
-        if task is None:
-            raise ValueError(f"async agent task '{async_agent_task_id}' is not registered")
-        details = [f"Async agent task {async_agent_task_id} ({task.agent_type}) {task.status}."]
-        if task.worktree_path:
-            details.append(f"Worktree: {task.worktree_path}")
-        if task.scope:
-            details.append(f"Scope: {task.scope}")
-        if task.answer:
-            details.append(task.answer)
-        if task.error:
-            details.append(f"Error: {task.error}")
-        notification = {
-            "role": "tool",
-            "name": "async_agent_notification",
-            "args": {"async_agent_task_id": async_agent_task_id, "status": task.status},
-            "content": "\n".join(details),
-            "created_at": now(),
-        }
-        self.record(notification)
-        self.record_conversation(notification)
 
     def interrupt_async_agent(self, async_agent_task_id: str) -> bool:
         """通过父 agent 注册的后台任务中断指定子 agent。"""
@@ -729,55 +760,6 @@ class AgentRuntime:
         task_ids = async_agent_task_ids or list(self._async_agent_tasks)
         return sum(self.interrupt_async_agent(async_agent_task_id) for async_agent_task_id in task_ids)
 
-    def active_async_agent_tasks(self) -> list[AsyncAgentTask]:
-        """返回当前父 agent 仍在运行的后台子任务。"""
-        return [task for task in self._async_agent_tasks.values() if not task.task.done()]
-
-    def record_async_agent_waiting_message(self) -> list[dict[str, str]]:
-        """将活跃子任务清单写入父 agent 会话，要求模型等待或中断。"""
-        active_tasks = self.active_async_agent_tasks()
-        if not active_tasks:
-            return []
-        task_details = [
-            {
-                "asyncAgentTaskId": task.async_agent_task_id,
-                "type": task.agent_type,
-                "task": task.task_prompt,
-            }
-            for task in active_tasks
-        ]
-        lines = ["You tried to finish, but background child agents are still running:"]
-        lines.extend(f"- {item['asyncAgentTaskId']} ({item['type']}): {item['task']}" for item in task_details)
-        lines.append("Call interrupt_agents to stop tasks that are no longer useful. Otherwise return final again to wait for their completion notifications.")
-        message = {"role": "system", "content": "\n".join(lines), "created_at": now()}
-        self.record(message)
-        self.record_conversation(message)
-        return task_details
-
-    def record_async_agents_ready_message(self, async_agent_task_ids: list[str]) -> None:
-        """通知主 agent 已等待完成指定子任务，下一轮应基于通知交付结果。"""
-        task_details = []
-        for async_agent_task_id in async_agent_task_ids:
-            task = self._async_agent_tasks.get(async_agent_task_id)
-            if task is not None:
-                task_details.append(f"- {task.async_agent_task_id} ({task.agent_type}): {task.status}")
-        lines = ["The background child-agent wait has finished."]
-        if task_details:
-            lines.extend(task_details)
-        lines.append(
-            "Use the child-agent notifications already in this conversation to answer the user now. "
-            "Do not call delegate again for a task whose result is already present. "
-            "Only delegate materially new work that is required to answer the user."
-        )
-        message = {"role": "system", "content": "\n".join(lines), "created_at": now()}
-        self.record(message)
-        self.record_conversation(message)
-
-    def record_async_agent_try_final(self, answer: str) -> None:
-        """保留尚未交付的候选 final，避免等待后的模型轮次丢失自身决策。"""
-        message = {"role": "assistant", "content": answer, "delivery": "try_final", "created_at": now()}
-        self.record(message)
-        self.record_conversation(message)
 
     async def wait_for_async_agents(self, async_agent_task_ids: list[str] | None = None) -> None:
         """等待指定或当前全部仍在运行的父级后台子任务结束。"""
@@ -789,20 +771,6 @@ class AgentRuntime:
         ]
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
-
-    @staticmethod
-    def _async_agent_task_signature(args: Mapping[str, Any]) -> str:
-        """将会影响子 agent 工作范围的字段规范化为父任务内的去重键。"""
-        return json.dumps(
-            {
-                "scope": str(args.get("scope", "")).strip(),
-                "task": str(args.get("task", "")).strip(),
-                "type": str(args.get("type", "default")).strip(),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
 
     def _worker_worktree_path(self, async_agent_task_id: str) -> Path:
         """返回当前仓库对应的后台 worker 隔离 worktree 路径。"""
@@ -831,16 +799,44 @@ class AgentRuntime:
         session["created_at"] = now()
         return session
 
-    async def _delegate_definition(self, async_agent_task_id: str, args: Mapping[str, Any]) -> Any:
+    def resolve_delegate_spec(self, raw_spec: Mapping[str, Any]) -> ResolvedDelegateSpec:
+        """校验委派规格，并按目标文件大小计算最低工具预算。"""
+        spec = toolkit.DelegateTaskSpec.model_validate(raw_spec)
+        targets = tuple(str(target).strip() for target in spec.targets)
+        target_paths = [self.path(target) for target in targets]
+        estimated_reads = 0
+        if spec.type == "explorer":
+            for target_path in target_paths:
+                if target_path.is_file():
+                    content = target_path.read_bytes()
+                    estimated_reads += max(1, math.ceil((content.count(b"\n") + 1) / READ_FILE_PAGE_LINES), math.ceil(len(content) / READ_FILE_PAGE_BYTES))
+                else:
+                    estimated_reads += 1
+            minimum = min(estimated_reads + (1 if len(target_paths) > 1 else 0), MAX_INITIAL_EXPLORER_STEPS)
+        elif spec.type == "worker":
+            minimum = min(6, MAX_INITIAL_WORKER_STEPS)
+        else:
+            minimum = 3
+        requested = spec.requested_max_steps
+        resolved = max(requested or 0, minimum)
+        return ResolvedDelegateSpec(
+            task=spec.task,
+            agent_type=spec.type,
+            scope=spec.scope.strip(),
+            targets=targets,
+            budget=ResolvedDelegateBudget(requested, minimum, resolved, estimated_reads, {"targets": list(targets), "estimatedReads": estimated_reads}),
+        )
+
+    async def _delegate_definition(self, async_agent_task_id: str, resolved: ResolvedDelegateSpec) -> Any:
         """根据 delegate type 构建后台运行所需的 agent 配置。"""
         from nano.runtime.run_agent import AgentDefinition
 
-        agent_type = str(args.get("type", "default"))
+        agent_type = resolved.agent_type
         common = {
             "model_client": self.model_client,
             "session_store": self.session_store,
             "run_store": self.run_store,
-            "max_steps": int(args.get("max_steps", 3)),
+            "max_steps": resolved.budget.resolved_max_steps,
             "max_new_tokens": self.max_new_tokens,
             "depth": self.depth + 1,
             "max_depth": self.max_depth,
@@ -852,7 +848,7 @@ class AgentRuntime:
         if agent_type == "explorer":
             return AgentDefinition(workspace=self.workspace, tools=EXPLORER_TOOLS, approval_policy="never", read_only=True, **common)
         elif agent_type == "worker":
-            scope = str(args["scope"]).strip()
+            scope = resolved.scope
             worktree_path = await asyncio.to_thread(self._create_worker_worktree, async_agent_task_id)
             worktree_root = worktree_path.resolve()
             task = self._async_agent_tasks[async_agent_task_id]
@@ -883,70 +879,77 @@ class AgentRuntime:
             )
         raise ValueError(f"unsupported delegate type: {agent_type}")
 
-    async def _run_async_agent(self, async_agent_task_id: str, args: Mapping[str, Any]) -> None:
-        """在后台消费 run_agent 事件，并在终止后通知父 agent。"""
+    async def _run_async_agent(self, async_agent_task_id: str, resolved: ResolvedDelegateSpec) -> None:
+        """消费子 agent 事件，并保存其终态结果。"""
         from nano.runtime.run_agent import run_agent
 
         answer = ""
         status = "failed"
         error = ""
+        stop_reason = ""
         try:
-            definition = await self._delegate_definition(async_agent_task_id, args)
-            agent_type = str(args.get("type", "default"))
+            definition = await self._delegate_definition(async_agent_task_id, resolved)
+            agent_type = resolved.agent_type
             async for event in run_agent(
                 agent_definition=definition,
-                prompt_messages=str(args["task"]),
+                prompt_messages=resolved.task,
                 use_exact_tools=self.use_exact_tools if agent_type == "default" else True,
                 max_turns=self.max_turns if agent_type == "default" else None,
             ):
                 if event.type == "final":
                     status = "completed"
                     answer = str(event.payload.get("answer", ""))
+                    stop_reason = "final_answer_returned"
                 elif event.type in {"error", "stopped"}:
                     status = "stopped" if event.type == "stopped" else "failed"
                     answer = str(event.payload.get("answer", event.payload.get("message", "")))
+                    stop_reason = str(event.payload.get("reason", "model_error"))
+                elif event.type == "tool_completed":
+                    task = self._async_agent_tasks[async_agent_task_id]
+                    if event.payload.get("counts_as_tool_step", True):
+                        task.used_tool_steps += 1
+                elif event.type == "next_turn" and event.payload.get("reason") == "auto_extension":
+                    self._async_agent_tasks[async_agent_task_id].auto_extensions += 1
         except asyncio.CancelledError:
             status = "stopped"
             answer = "Interrupted by parent agent."
+            stop_reason = "user_interrupted"
             raise
         except Exception as exc:
             error = str(exc)
         finally:
-            self.complete_agent_task(async_agent_task_id, status, answer, error)
-            self.enqueue_agent_notification(async_agent_task_id)
+            self.complete_agent_task(async_agent_task_id, status, answer, error, stop_reason)
 
-    async def spawn_delegate(self, args: Mapping[str, Any]) -> str:
-        """注册后台 delegate 并立即返回其 asyncAgentTaskId，不等待子 agent 运行。"""
-        signature = self._async_agent_task_signature(args)
-        existing_task_id = self._async_agent_task_ids_by_signature.get(signature)
-        if existing_task_id is not None:
-            existing_task = self._async_agent_tasks[existing_task_id]
-            if not existing_task.task.done():
-                return json.dumps({"status": "async_already_running", "asyncAgentTaskId": existing_task_id})
-            if existing_task.status == "completed":
-                return json.dumps({"status": "async_already_completed", "asyncAgentTaskId": existing_task_id})
-            return json.dumps(
-                {
-                    "status": "async_already_finished",
-                    "asyncAgentTaskId": existing_task_id,
-                    "taskStatus": existing_task.status,
-                }
-            )
+    def _create_async_agent_task(self, resolved: ResolvedDelegateSpec) -> str:
+        """创建并注册一个子任务，但不等待其完成。"""
         async_agent_task_id = str(uuid.uuid4())
-        background_task = asyncio.create_task(self._run_async_agent(async_agent_task_id, dict(args)))
+        background_task = asyncio.create_task(self._run_async_agent(async_agent_task_id, resolved))
         self.register_async_agent(
             async_agent_task_id,
             AsyncAgentTask(
                 async_agent_task_id=async_agent_task_id,
-                signature=signature,
-                agent_type=str(args.get("type", "default")),
-                task_prompt=str(args["task"]),
+                agent_type=resolved.agent_type,
+                task_prompt=resolved.task,
                 task=background_task,
-                scope=str(args.get("scope", "")).strip(),
+                scope=resolved.scope,
+                targets=resolved.targets,
+                requested_max_steps=resolved.budget.requested_max_steps,
+                minimum_max_steps=resolved.budget.minimum_max_steps,
+                resolved_max_steps=resolved.budget.resolved_max_steps,
             ),
         )
-        self._async_agent_task_ids_by_signature[signature] = async_agent_task_id
-        return json.dumps({"status": "async_launched", "asyncAgentTaskId": async_agent_task_id})
+        return async_agent_task_id
+
+    def serialize_async_agent_result(self, async_agent_task_id: str) -> dict[str, Any]:
+        """将一个已经结束的子任务序列化为 delegate 的稳定结果格式。"""
+        task = self._async_agent_tasks[async_agent_task_id]
+        return {"asyncAgentTaskId": task.async_agent_task_id, "type": task.agent_type, "task": task.task_prompt, "targets": list(task.targets), "scope": task.scope, "worktreePath": task.worktree_path, "status": task.status, "stopReason": task.stop_reason, "answer": task.answer, "error": task.error, "requestedMaxSteps": task.requested_max_steps, "minimumMaxSteps": task.minimum_max_steps, "resolvedMaxSteps": task.resolved_max_steps, "usedToolSteps": task.used_tool_steps, "autoExtensions": task.auto_extensions}
+
+    async def run_delegates(self, raw_specs: list[Mapping[str, Any]]) -> str:
+        """并发创建全部子 agent，并等待全部任务进入终态。"""
+        child_ids = [self._create_async_agent_task(self.resolve_delegate_spec(raw_spec)) for raw_spec in raw_specs]
+        await self.wait_for_async_agents(child_ids)
+        return json.dumps({"status": "completed", "children": [self.serialize_async_agent_result(child_id) for child_id in child_ids]}, ensure_ascii=False)
 
     def tool_list_files(self, args):
         return toolkit.tool_list_files(self.tool_context(), args)

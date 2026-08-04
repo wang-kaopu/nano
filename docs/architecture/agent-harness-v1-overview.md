@@ -13,6 +13,8 @@ Agent Harness v1 is Nano's current runtime shape: a local control loop around a 
 7. Start eligible read-only tools while the response stream is still active, then execute remaining tools in call order through runtime policy.
 8. Write task state, trace events, checkpoints, and report artifacts.
 
+`delegate` is a structured join operation: one call accepts a bounded task batch, starts all child agents concurrently, and returns only after every child reaches a terminal state. Child results are part of the tool result rather than asynchronous parent-session notifications. `read_file` returns opaque-cursor pagination metadata and runtime-maintained coverage so long files can be read without relying on model-managed line arithmetic.
+
 ## State Artifacts
 
 - `task_state.json` records attempts, tool steps, status, stop reason, and final answer.
