@@ -1,7 +1,8 @@
+import asyncio
 import os
 import shlex
 import sys
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext
 from nano import cli as nano_cli
@@ -249,8 +250,8 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
     fake_run.assert_called_once()
     assert runtime.tool_run_shell.__func__.__module__ == "nano.runtime.runtime"
 
-    with patch("nano.tools.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = runtime.tool_delegate({"task": "inspect README.md", "max_steps": 2})
+    with patch("nano.tools.tools.tool_delegate", new=AsyncMock(return_value="toolkit-delegate")) as fake_delegate:
+        delegate_result = asyncio.run(runtime.tool_delegate({"task": "inspect README.md", "max_steps": 2}))
 
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
@@ -278,7 +279,7 @@ def test_delegate_child_is_read_only(tmp_path):
         ],
     )
 
-    result = runtime.ask("Delegate the work")
+    result = asyncio.run(runtime.ask_async("Delegate the work"))
 
     assert result == "parent done"
     assert not target.exists()

@@ -2,8 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Callable, Mapping
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from nano.permissions import ProjectPermissions
 
@@ -15,7 +14,7 @@ class ToolContext:
     shell_env_provider: Callable[[], Mapping[str, str]]
     depth: int
     max_depth: int
-    spawn_delegate: Callable[[Mapping[str, Any]], str]
+    spawn_delegate: Callable[[Mapping[str, Any]], Any]
     read_file_state: dict[str, int] = field(default_factory=dict)
     permissions: ProjectPermissions = field(default_factory=ProjectPermissions.empty)
 

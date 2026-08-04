@@ -1,4 +1,4 @@
-"""一次 ask() 运行过程中的状态机快照。
+"""一次 agent 运行过程中的状态机快照。
 
 它回答的是：这次用户请求当前进行到哪了、调了多少次工具、最后为什么停下。
 这个对象会被不断写入 task_state.json，供运行中观察和运行后复盘。
@@ -18,6 +18,7 @@ TaskStatus = Literal["running", "completed", "stopped", "failed"]
 
 STOP_REASON_FINAL_ANSWER_RETURNED = "final_answer_returned"
 STOP_REASON_STEP_LIMIT_REACHED = "step_limit_reached"
+STOP_REASON_TURN_LIMIT_REACHED = "turn_limit_reached"
 STOP_REASON_RETRY_LIMIT_REACHED = "retry_limit_reached"
 STOP_REASON_MODEL_ERROR = "model_error"
 STOP_REASON_TOOL_TIMEOUT = "tool_timeout"
@@ -29,7 +30,7 @@ STOP_REASON_USER_INTERRUPTED = "user_interrupted"
 
 
 class TaskState(BaseModel):
-    """描述一次 ask() 运行的可持久化状态。"""
+    """描述一次 agent 运行的可持久化状态。"""
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -82,6 +83,10 @@ class TaskState(BaseModel):
     def stop_step_limit(self, final_answer: str = "") -> "TaskState":
         """标记运行达到最大步数。"""
         return self.stop(STOP_REASON_STEP_LIMIT_REACHED, final_answer=final_answer)
+
+    def stop_turn_limit(self, final_answer: str = "") -> "TaskState":
+        """标记运行达到最大模型循环次数。"""
+        return self.stop(STOP_REASON_TURN_LIMIT_REACHED, final_answer=final_answer)
 
     def stop_retry_limit(self, final_answer: str = "") -> "TaskState":
         """标记运行达到模型重试上限。"""

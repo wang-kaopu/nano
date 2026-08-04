@@ -1,9 +1,8 @@
 """Session JSON persistence."""
 
-from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from nano.storage.schemas import SessionModel
 from nano.tools.security import redact_artifact

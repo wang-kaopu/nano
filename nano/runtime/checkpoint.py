@@ -1,5 +1,6 @@
 """Checkpoint and resume-state helpers."""
 
+import hashlib
 import uuid
 from typing import Any
 
@@ -23,6 +24,9 @@ RUNTIME_IDENTITY_KEYS = (
     "approval_policy",
     "read_only",
     "max_steps",
+    "max_turns",
+    "agent_instructions_hash",
+    "use_exact_tools",
     "max_new_tokens",
     "feature_flags",
     "shell_env_allowlist",
@@ -39,6 +43,9 @@ def current_runtime_identity(runtime: AgentRuntime) -> dict[str, Any]:
         "approval_policy": runtime.approval_policy,
         "read_only": bool(runtime.read_only),
         "max_steps": int(runtime.max_steps),
+        "max_turns": int(runtime.max_turns),
+        "agent_instructions_hash": hashlib.sha256(runtime.agent_instructions.encode("utf-8")).hexdigest(),
+        "use_exact_tools": bool(runtime.use_exact_tools),
         "max_new_tokens": int(runtime.max_new_tokens),
         "feature_flags": dict(runtime.feature_flags),
         "shell_env_allowlist": list(runtime.shell_env_allowlist),

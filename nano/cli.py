@@ -6,13 +6,14 @@
 """
 
 import argparse
+import asyncio
 import os
 import signal
 import shutil
 import sys
 import textwrap
 import time
-from collections.abc import Callable, Sequence
+from typing import Callable, Sequence
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import has_completions
@@ -25,6 +26,7 @@ from prompt_toolkit.widgets import Dialog, Label, RadioList
 
 from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
+from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import AgentRuntime
 from nano.skills import get_skill_by_name, resolve_skill_prompt, discover_skills
@@ -170,11 +172,21 @@ class _LiveResponsePrinter:
         self.has_output = True
 
 
+async def _consume_streamed_response(runtime: AgentRuntime, user_message: str) -> tuple[str, bool]:
+    """消费运行事件流，并返回最终答案及是否已实时输出正文。"""
+    printer = _LiveResponsePrinter()
+    answer = ""
+    async for event in QueryEngine(runtime).stream_async(user_message):
+        printer(event)
+        if event.type in {"final", "error", "stopped"}:
+            answer = str(event.payload["answer"])
+    return answer, printer.has_output
+
+
 def _print_streamed_response(runtime: AgentRuntime, user_message: str) -> None:
     """执行请求并实时打印模型回答，流结束后补齐终端换行。"""
-    printer = _LiveResponsePrinter()
-    answer = runtime.ask(user_message, event_callback=printer)
-    if printer.has_output:
+    answer, has_output = asyncio.run(_consume_streamed_response(runtime, user_message))
+    if has_output:
         print()
         return
     print(answer)
@@ -358,7 +370,7 @@ def build_agent(args: argparse.Namespace) -> AgentRuntime:
 
     在 agent 链路里的位置：
     它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
-    得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会落到 `ask()`。
+    得到 agent 后，后面无论是 one-shot 还是 REPL 模式，都会消费异步事件流。
     """
     # 这里是 CLI 到 runtime 的装配点：
     # 先采集工作区快照和加载项目级环境，再整理 secret 名单、模型后端和 session。

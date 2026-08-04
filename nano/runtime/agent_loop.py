@@ -2,7 +2,6 @@
 
 import asyncio
 import time
-from collections.abc import Callable
 
 from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
 from nano.runtime.query_events import QueryEvent
@@ -19,17 +18,18 @@ class QueryEngine:
         """绑定持有会话和运行工件的运行时。"""
         self.runtime = runtime
 
-    def run(self, user_message: str, event_callback: Callable[[QueryEvent], None] | None = None) -> str:
-        """供未持有事件循环的同步调用方执行一条查询，并可接收运行事件。"""
-        try:
-            # 检查当前线程是否已运行 asyncio 事件循环。没有事件循环时会抛出 RuntimeError。
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(self.run_async(user_message, event_callback=event_callback))
-        raise RuntimeError("AgentRuntime.ask() cannot run inside an event loop; await AgentRuntime.ask_async() instead")
+    async def run_async(self, user_message: str) -> str:
+        """执行一条用户请求、持久化运行工件并返回最终答案。"""
+        final_answer = None
+        async for event in self.stream_async(user_message):
+            if event.type in {"final", "error", "stopped"}:
+                final_answer = str(event.payload["answer"])
+        if final_answer is not None:
+            return final_answer
+        raise RuntimeError("QueryEngine stream ended without a terminal event")
 
-    async def run_async(self, user_message: str, event_callback: Callable[[QueryEvent], None] | None = None) -> str:
-        """执行一条用户请求、持久化运行工件，并可接收运行事件。"""
+    async def stream_async(self, user_message: str):
+        """以事件流方式执行一条请求，并在终止事件产生前完成工件持久化。"""
         runtime = self.runtime
         run_started_at = time.monotonic()
         runtime.memory.set_task_summary(user_message)
@@ -50,11 +50,18 @@ class QueryEngine:
                 "user_request": clip(user_message, 300),
             },
         )
+        yield QueryEvent(
+            "run_started",
+            {
+                "task_id": task_state.task_id,
+                "run_id": task_state.run_id,
+                "use_exact_tools": runtime.use_exact_tools,
+                "max_turns": runtime.max_turns,
+            },
+        )
 
         try:
             async for event in QueryLoop(runtime, task_state, user_message, memory_prefetch).run():
-                if event_callback is not None:
-                    event_callback(event)
                 if event.type == "prompt_built":
                     prompt_metadata = event.payload["prompt_metadata"]
                     runtime.emit_trace(task_state, "prompt_built", {"prompt_metadata": prompt_metadata})
@@ -88,16 +95,23 @@ class QueryEngine:
                 elif event.type == "final":
                     final = event.payload["answer"]
                     runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
-                    return self._finish_success(task_state, user_message, final, run_started_at)
+                    self._finish_success(task_state, user_message, final, run_started_at)
+                    yield event
+                    return
                 elif event.type == "error":
                     final = event.payload["message"]
                     task_state.stop_model_error(final)
                     runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                    return self._finish_stopped(task_state, user_message, final, run_started_at)
+                    self._finish_stopped(task_state, user_message, final, run_started_at)
+                    yield QueryEvent("error", {"message": final, "answer": final})
+                    return
                 elif event.type == "stopped":
                     if event.payload["reason"] == "retry_limit_reached":
                         final = "Stopped after too many malformed model responses without a valid tool call or final answer."
                         task_state.stop_retry_limit(final)
+                    elif event.payload["reason"] == "turn_limit_reached":
+                        final = "Stopped after reaching the turn limit without a final answer."
+                        task_state.stop_turn_limit(final)
                     elif event.payload["reason"] == "approval_denied":
                         final = "Operation was not executed because approval was denied."
                         task_state.stop_approval_denied(final)
@@ -105,7 +119,10 @@ class QueryEngine:
                         final = "Stopped after reaching the step limit without a final answer."
                         task_state.stop_step_limit(final)
                     runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                    return self._finish_stopped(task_state, user_message, final, run_started_at)
+                    self._finish_stopped(task_state, user_message, final, run_started_at)
+                    yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
+                    return
+                yield event
         except asyncio.CancelledError:
             active_tool_tasks = list(runtime._active_tool_tasks)
             if active_tool_tasks:
@@ -113,7 +130,9 @@ class QueryEngine:
             final = "Interrupted by user."
             task_state.stop_user_interrupted(final)
             runtime.record({"role": "assistant", "content": final, "created_at": now()})
-            return self._finish_stopped(task_state, user_message, final, run_started_at)
+            self._finish_stopped(task_state, user_message, final, run_started_at)
+            yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
+            return
         finally:
             if memory_prefetch is not None and not memory_prefetch.settled:
                 memory_prefetch.task.cancel()

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 from contextlib import contextmanager
@@ -18,6 +19,11 @@ DEFAULT_CONTEXT_ABLATION_V2_PATH = Path("artifacts/context-ablation-v2.json")
 DEFAULT_MEMORY_ABLATION_V2_PATH = Path("artifacts/memory-ablation-v2.json")
 DEFAULT_RECOVERY_ABLATION_V2_PATH = Path("artifacts/recovery-ablation-v2.json")
 DEFAULT_CORE_REPORT_PATH = Path("docs/metrics/nano-benchmark-core-report.md")
+
+
+def _ask_runtime(runtime, prompt):
+    """在同步指标计算边界运行 runtime 的异步查询入口。"""
+    return asyncio.run(runtime.ask_async(prompt))
 
 
 def _safe_mean(values):
@@ -288,7 +294,7 @@ def _run_memory_variant(mode):
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         (workspace_root / "facts.txt").write_text("deploy key is red\n", encoding="utf-8")
         runtime = _build_memory_experiment_agent(workspace_root, "deploy key is red", "facts.txt")
-        assert runtime.ask("Read facts.txt and remember the key fact.") == "Done."
+        assert _ask_runtime(runtime, "Read facts.txt and remember the key fact.") == "Done."
 
         if mode == "memory_off":
             runtime.feature_flags["memory"] = False
@@ -296,7 +302,7 @@ def _run_memory_variant(mode):
         elif mode == "memory_irrelevant":
             _set_irrelevant_memory(runtime)
 
-        result = runtime.ask("What color is the deploy key?")
+        result = _ask_runtime(runtime, "What color is the deploy key?")
         task_state = runtime.current_task_state
         if task_state is None:
             raise RuntimeError("memory experiment completed without task state")
@@ -386,13 +392,13 @@ def _run_memory_task_variant(task, variant):
         (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
         _write_memory_task_files(workspace_root, task)
         runtime = _build_memory_experiment_agent(workspace_root, task["fact"], task["filename"])
-        assert runtime.ask(_bootstrap_prompt(task)) == "Done."
+        assert _ask_runtime(runtime, _bootstrap_prompt(task)) == "Done."
         if variant == "memory_off":
             runtime.feature_flags["memory"] = False
             runtime.feature_flags["relevant_memory"] = False
         elif variant == "memory_irrelevant":
             _set_irrelevant_memory_for_task(runtime)
-        result = runtime.ask(_followup_prompt(task))
+        result = _ask_runtime(runtime, _followup_prompt(task))
         task_state = runtime.current_task_state
         if task_state is None:
             raise RuntimeError("memory experiment completed without task state")
@@ -876,7 +882,7 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
                     (workspace_root / "README.md").write_text("demo\n", encoding="utf-8")
                     _write_memory_task_files(workspace_root, task)
                     runtime = _build_real_agent(workspace_root, provider)
-                    runtime.ask(f"Read {task['filename']} and remember the exact line. After you know it, reply with Done only.")
+                    _ask_runtime(runtime, f"Read {task['filename']} and remember the exact line. After you know it, reply with Done only.")
                     if variant == "memory_off":
                         runtime.feature_flags["memory"] = False
                         runtime.feature_flags["relevant_memory"] = False
@@ -899,7 +905,7 @@ def run_real_memory_experiment(provider="gpt", repetitions=1):
                             f"What exact conclusion did you already establish from {task['filename']}? "
                             "Reply with the exact line only. If you are not certain, verify with tools instead of guessing."
                         )
-                    answer = runtime.ask(prompt)
+                    answer = _ask_runtime(runtime, prompt)
                     task_state = runtime.current_task_state
                     if task_state is None:
                         raise RuntimeError("memory experiment completed without task state")
@@ -964,7 +970,7 @@ def run_real_context_experiment(provider="gpt", repetitions=1):
                                     }
                                 )
                             with _temporary_feature_flags(runtime, updates):
-                                answer = runtime.ask(f"What is the target token remembered in the notes? {request_text}")
+                                answer = _ask_runtime(runtime, f"What is the target token remembered in the notes? {request_text}")
                             per_run.append(
                                 {
                                     "variant": variant_name,
@@ -1051,7 +1057,7 @@ def _run_real_repeated_call_scenario(provider):
         runtime = _build_real_agent(workspace_root, provider)
         prompt = 'Respond with exactly this tool call and nothing else: <tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":20}}</tool>'
         for _ in range(3):
-            runtime.ask(prompt)
+            _ask_runtime(runtime, prompt)
         return _security_result_row("repeated_identical_call", provider, dict(runtime._last_tool_result_metadata))
 
 
@@ -1074,7 +1080,7 @@ def run_real_security_experiment_suite(provider="gpt", repetitions=1):
                     approval_policy=scenario["approval_policy"],
                     read_only=scenario["read_only"],
                 )
-                runtime.ask(scenario["prompt"])
+                _ask_runtime(runtime, scenario["prompt"])
                 rows.append(_security_result_row(scenario["id"], provider, dict(runtime._last_tool_result_metadata)))
 
     for row in rows:
@@ -1541,7 +1547,7 @@ def _run_recovery_task_variant(task, variant):
         if variant == "resume_disabled":
             runtime.session.pop("checkpoints", None)
             runtime.session_store.save(runtime.session)
-        final_answer = runtime.ask("Continue the recovery task.")
+        final_answer = _ask_runtime(runtime, "Continue the recovery task.")
         task_state = runtime.current_task_state
         if task_state is None:
             raise RuntimeError("recovery experiment completed without task state")

@@ -11,8 +11,7 @@ import json
 import random
 import sys
 import time
-from collections.abc import AsyncIterator, Iterable, Mapping
-from typing import Any
+from typing import Any, AsyncIterator, Iterable, Mapping
 
 import httpx
 
@@ -301,7 +300,7 @@ class OpenAICompatibleModelClient:
           `self.last_completion_metadata`
 
         在 agent 链路里的位置：
-        它位于 `AgentRuntime.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
+        它位于 `AgentRuntime.ask_async()` 的模型调用阶段，是稳定前缀缓存复用链路真正
         落到 provider API 的地方。
         """
         self.last_completion_metadata = {}

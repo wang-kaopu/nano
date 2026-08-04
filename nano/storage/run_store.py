@@ -41,7 +41,7 @@ class RunStore:
         return path
 
     def start_run(self, task_state: TaskState) -> Path:
-        # 每次 ask() 都会生成一个 run 目录。
+        # 每次 agent 执行都会生成一个 run 目录。
         # 这样一次用户请求对应一组独立工件，后续排查更容易。
         run_dir = self.run_dir(task_state)
         run_dir.mkdir(parents=True, exist_ok=True)

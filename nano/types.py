@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
-from typing import TYPE_CHECKING, Any, Protocol, TypeAlias
+from typing import Any, AsyncIterator, Mapping, Protocol, TypeAlias
 
-if TYPE_CHECKING:
-    from nano.runtime.query_events import ModelStreamEvent
+from nano.runtime.query_events import ModelStreamEvent
 
 ToolArguments: TypeAlias = Mapping[str, Any]
 

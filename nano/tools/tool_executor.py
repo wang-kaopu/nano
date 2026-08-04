@@ -2,8 +2,7 @@
 
 import asyncio
 import re
-from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -250,5 +249,69 @@ class ToolExecutor:
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
 
     async def execute_async(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
-        """在不阻塞事件循环的前提下执行同步安全闸口。"""
-        return await asyncio.to_thread(self.execute, name, args)
+        """异步执行工具；delegate 直接在事件循环中协调子 agent。"""
+        tool = self.runtime.tools.get(name)
+        if tool is None:
+            tool = next((candidate for candidate in self.runtime.tools.values() if name in candidate.aliases), None)
+        if tool is None or tool.name != "delegate":
+            return await asyncio.to_thread(self.execute, name, args)
+
+        runtime = self.runtime
+        input_value: Any = None
+        try:
+            input_value = tool.parse_input(args)
+            permission = tool.check_permissions(input_value, runtime.tool_context())
+            if permission.behavior != "allow":
+                raise ValueError(permission.message)
+            input_value = permission.updated_input or input_value
+            args = input_value.model_dump(mode="python")
+        except Exception as exc:
+            example = runtime.tool_example(name)
+            message = f"error: invalid arguments for {name}: {exc}"
+            if example:
+                message += f"\nexample: {example}"
+            return ToolExecutionResult(
+                content=message,
+                metadata=_metadata("rejected", tool_error_code="invalid_arguments", risk_level="low", read_only=True),
+            )
+
+        if runtime.repeated_tool_call(name, args):
+            return ToolExecutionResult(
+                content=f"error: repeated identical tool call for {name}; choose a different tool or return a final answer",
+                metadata=_metadata("rejected", tool_error_code="repeated_identical_call", risk_level="low", read_only=True),
+            )
+
+        try:
+            parent_message = next(
+                (str(item.get("content", "")) for item in reversed(runtime.session["history"]) if item.get("role") == "user"),
+                None,
+            )
+            result = await tool.call_async(
+                input_value,
+                runtime.tool_context(),
+                lambda candidate, _: runtime.allowed_tools is None or candidate.name in runtime.allowed_tools or name in runtime.allowed_tools,
+                parent_message,
+            )
+            content, result_artifact_path = self._render_result_content(tool, result.content)
+            if not content.strip():
+                content = "(no output)"
+            runtime.update_memory_after_tool(name, args, content)
+            metadata = _metadata(
+                "ok",
+                risk_level="low",
+                read_only=True,
+                workspace_fingerprint=runtime.workspace.fingerprint(),
+                result_artifact_path=result_artifact_path,
+            )
+            runtime.record_process_note_for_tool(name, metadata)
+            return ToolExecutionResult(content=content, metadata=metadata)
+        except Exception as exc:
+            metadata = _metadata(
+                "error",
+                tool_error_code="tool_failed",
+                risk_level="low",
+                read_only=True,
+                workspace_fingerprint=runtime.workspace.fingerprint(),
+            )
+            runtime.record_process_note_for_tool(name, metadata)
+            return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)

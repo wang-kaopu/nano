@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 from nano.tools.tool import CanUseTool, Tool, ToolProgressData, ToolResult
@@ -51,16 +52,22 @@ def test_tool_base_class_uses_safe_default_semantics():
 
 def test_delegate_uses_context_spawn_without_runtime_import(tmp_path):
     calls = []
+
+    async def spawn_delegate(args):
+        """记录委派请求，并模拟子 agent 的异步最终结论。"""
+        calls.append(args)
+        return "delegate_result:\nDone"
+
     context = ToolContext(
         root=tmp_path,
         path_resolver=lambda raw_path: Path(tmp_path / raw_path),
         shell_env_provider=lambda: {"PWD": str(tmp_path)},
         depth=0,
         max_depth=1,
-        spawn_delegate=lambda args: calls.append(args) or "delegate_result:\nDone",
+        spawn_delegate=spawn_delegate,
     )
 
-    result = tool_delegate(context, {"task": "inspect README.md", "max_steps": 2})
+    result = asyncio.run(tool_delegate(context, {"task": "inspect README.md", "max_steps": 2}))
 
     assert result == "delegate_result:\nDone"
     assert calls == [{"task": "inspect README.md", "max_steps": 2}]

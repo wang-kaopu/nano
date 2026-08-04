@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import locale as locale_module
@@ -47,6 +48,11 @@ TASK_FIXTURE_ARTIFACTS = {
     "bench_repo_readme": "README.md",
     "bench_repo_patch": "sample.txt",
 }
+
+
+def _ask_runtime(runtime, prompt):
+    """在同步评测边界运行 runtime 的异步查询入口。"""
+    return asyncio.run(runtime.ask_async(prompt))
 
 SCRIPTED_MODEL_OUTPUTS = {
     "readme_intro_locked": [
@@ -472,7 +478,7 @@ class BenchmarkEvaluator:
         initial_task_summary_empty = not str(initial_memory_state["working"]["task_summary"]).strip()
         initial_episodic_notes_empty = not initial_memory_state["episodic_notes"]
 
-        final_answer = runtime.ask(task["prompt"])
+        final_answer = _ask_runtime(runtime, task["prompt"])
         task_state = runtime.current_task_state
         run_dir = runtime.current_run_dir
         if task_state is None or run_dir is None:

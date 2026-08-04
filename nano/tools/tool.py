@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import asyncio
 from dataclasses import dataclass
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Callable, Generic, Literal, Mapping, TypeVar
 
 from pydantic import BaseModel
 
@@ -123,6 +123,17 @@ class Tool(Generic[InputT, OutputT, ProgressT]):
     ) -> ToolResult[OutputT]:
         """执行已校验工具调用并返回统一结果。"""
         raise NotImplementedError("Tool subclasses must implement call()")
+
+    async def call_async(
+        self,
+        args: InputT,
+        context: Any,
+        can_use_tool: CanUseTool,
+        parent_message: str | None,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolResult[OutputT]:
+        """在工作线程中执行默认的同步工具实现。"""
+        return await asyncio.to_thread(self.call, args, context, can_use_tool, parent_message, on_progress)
 
     def render_tool_use_message(self, input_value: InputT, options: Mapping[str, Any] | None = None) -> str:
         """返回 CLI 中展示工具调用的文本。"""

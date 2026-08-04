@@ -1,9 +1,8 @@
 """Security and redaction helpers for runtime artifacts."""
 
 import os
-from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 SENSITIVE_ENV_NAME_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD")
 REDACTED_VALUE = "<redacted>"

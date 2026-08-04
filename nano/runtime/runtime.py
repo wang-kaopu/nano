@@ -10,10 +10,9 @@ import hashlib
 import os
 import re
 import uuid
-from collections.abc import Iterable, Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 import nano.tools.security as securitylib
 import nano.tools.tools as toolkit
@@ -24,7 +23,6 @@ from nano.runtime.task_state import TaskState
 from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
-from nano.tools.security import REDACTED_VALUE
 from nano.tools.tool import Tool, ToolProgressData
 from nano.tools.tool_context import ToolContext
 from nano.types import ModelClient
@@ -39,6 +37,20 @@ DEFAULT_FEATURE_FLAGS = {
 }
 MODEL_CONTEXT_WINDOW = 1_000_000
 CONTEXT_WINDOW_RESERVE = 20_000
+
+
+class SubagentHandle:
+    """持有已启动子 agent 的运行时，并提供等待最终结论的入口。"""
+
+    def __init__(self, runtime, task) -> None:
+        """绑定子 agent runtime 与其后台运行任务。"""
+        self.runtime = runtime
+        self.task = task
+
+    async def wait(self) -> str:
+        """等待子 agent 完成当前任务并返回最终结论。"""
+        return await self.task
+
 
 class AgentRuntime:
     def __init__(
@@ -58,6 +70,10 @@ class AgentRuntime:
         secret_env_names: Iterable[str] | None = None,
         feature_flags: Mapping[str, bool] | None = None,
         allowed_tools: Iterable[str] | None = None,
+        tool_use_context: ToolContext | None = None,
+        use_exact_tools: bool = False,
+        max_turns: int | None = None,
+        agent_instructions: str = "",
     ) -> None:
         from nano.runtime.context_manager import ContextManager
         from nano.tools.tool_executor import ToolExecutor
@@ -70,6 +86,12 @@ class AgentRuntime:
         self.session_store = session_store
         self.approval_policy = approval_policy
         self.max_steps = max_steps
+        # 未显式配置 turn 上限时，保留既有的“允许若干次格式重试”行为。
+        self.max_turns = max(max_steps * 3, max_steps + 4) if max_turns is None else int(max_turns)
+        if self.max_steps < 1:
+            raise ValueError("max_steps must be at least 1")
+        if self.max_turns < 1:
+            raise ValueError("max_turns must be at least 1")
         self.max_new_tokens = max_new_tokens
         self.effective_window = MODEL_CONTEXT_WINDOW - CONTEXT_WINDOW_RESERVE
         self.depth = depth
@@ -81,6 +103,11 @@ class AgentRuntime:
         if feature_flags:
             self.feature_flags.update({str(key): bool(value) for key, value in feature_flags.items()})
         self.allowed_tools = self._normalize_allowed_tools(allowed_tools)
+        self.tool_use_context_override = tool_use_context
+        if tool_use_context is not None and tool_use_context.root.resolve() != self.root.resolve():
+            raise ValueError("tool_use_context.root must match the runtime workspace root")
+        self.use_exact_tools = bool(use_exact_tools)
+        self.agent_instructions = str(agent_instructions).strip()
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".nano" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
@@ -230,6 +257,7 @@ class AgentRuntime:
             tools=self.tools,
             memory_prompt_section=memory_prompt_section,
             skill_descriptions=skill_descriptions,
+            agent_instructions=self.agent_instructions,
             native_tool_calls=self.model_client.supports_native_tool_calls,
         )
 
@@ -519,17 +547,11 @@ class AgentRuntime:
         self.memory.append_note(text, tags=tuple(tags), source=name, kind="process")
         self.session["memory"] = self.memory.to_dict()
 
-    def ask(self, user_message, event_callback=None):
-        """为同步调用方执行一条请求，并可订阅处理过程中的运行事件。"""
+    async def ask_async(self, user_message):
+        """异步执行一条请求并返回最终答案。"""
         from nano.runtime.agent_loop import QueryEngine
 
-        return QueryEngine(self).run(user_message, event_callback=event_callback)
-
-    async def ask_async(self, user_message, event_callback=None):
-        """异步执行一条请求、返回最终答案，并可订阅处理过程中的运行事件。"""
-        from nano.runtime.agent_loop import QueryEngine
-
-        return await QueryEngine(self).run_async(user_message, event_callback=event_callback)
+        return await QueryEngine(self).run_async(user_message)
 
     def interrupt_current_request(self):
         """请求取消当前正在运行的模型查询。"""
@@ -570,7 +592,7 @@ class AgentRuntime:
           这样模型下一轮都能继续消费这份反馈。
 
         在 agent 链路里的位置：
-        它位于 `ask()` 的“模型决定要调用工具”之后，是控制循环里真正把模型
+        它位于 `ask_async()` 的“模型决定要调用工具”之后，是控制循环里真正把模型
         意图落到外部世界的一步。因此这里串起了几乎所有安全与可控设计：
         工具是否存在、参数是否合法、是否重复、是否需要审批、执行结果是否裁剪、
         是否需要回写记忆。
@@ -625,6 +647,8 @@ class AgentRuntime:
         return toolkit.validate_tool(self.tool_context(), name, args)
 
     def tool_context(self):
+        if self.tool_use_context_override is not None:
+            return self.tool_use_context_override
         return ToolContext(
             root=self.root,
             path_resolver=self.path,
@@ -636,7 +660,17 @@ class AgentRuntime:
             permissions=self.permissions,
         )
 
-    def spawn_delegate(self, args):
+    async def _consume_subagent_stream(self, task: str) -> str:
+        """由子 agent 自行消费自身 QueryLoop 事件并返回终止答案。"""
+        from nano.runtime.agent_loop import QueryEngine
+
+        async for event in QueryEngine(self).stream_async(task):
+            if event.type in {"final", "error", "stopped"}:
+                return str(event.payload["answer"])
+        raise RuntimeError("subagent stream ended without a terminal event")
+
+    async def start_subagent(self, args) -> SubagentHandle:
+        """异步创建并启动只读子 agent，立即返回可等待的运行句柄。"""
         task = str(args.get("task", "")).strip()
         child = AgentRuntime(
             model_client=self.model_client,
@@ -651,13 +685,20 @@ class AgentRuntime:
             read_only=True,
             secret_env_names=self.secret_env_names,
             shell_env_allowlist=self.shell_env_allowlist,
+            allowed_tools=self.allowed_tools if self.use_exact_tools else None,
+            use_exact_tools=self.use_exact_tools,
         )
         # 委派的目标是“调查”，不是“放权执行”。
         # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
         child.memory.set_task_summary(task)
         child.memory.append_note(clip(self.history_text(), 300), source="parent_history")
         child.session["memory"] = child.memory.to_dict()
-        return "delegate_result:\n" + child.ask(task)
+        return SubagentHandle(child, asyncio.create_task(child._consume_subagent_stream(task)))
+
+    async def spawn_delegate(self, args) -> str:
+        """启动子 agent 并等待其调查结论，供异步 delegate 工具调用。"""
+        subagent = await self.start_subagent(args)
+        return "delegate_result:\n" + await subagent.wait()
 
     def tool_list_files(self, args):
         return toolkit.tool_list_files(self.tool_context(), args)
@@ -677,8 +718,9 @@ class AgentRuntime:
     def tool_patch_file(self, args):
         return toolkit.tool_patch_file(self.tool_context(), args)
 
-    def tool_delegate(self, args):
-        return toolkit.tool_delegate(self.tool_context(), args)
+    async def tool_delegate(self, args):
+        """异步执行 delegate 工具。"""
+        return await toolkit.tool_delegate(self.tool_context(), args)
 
     def approve(self, name, args):
         if self.read_only:

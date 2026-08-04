@@ -41,6 +41,11 @@ def build_agent(tmp_path, outputs, **kwargs):
     )
 
 
+def run_query(runtime, user_message):
+    """在同步测试中运行 runtime 的异步查询入口。"""
+    return asyncio.run(runtime.ask_async(user_message))
+
+
 def configure_mock_model_client(client):
     """补齐构造 AgentRuntime 所需的模型客户端协议字段。"""
     client.model = "mock-model"
@@ -79,7 +84,7 @@ def test_agent_runs_tool_then_final(tmp_path):
         ],
     )
 
-    answer = runtime.ask("Inspect hello.txt")
+    answer = run_query(runtime, "Inspect hello.txt")
 
     assert answer == "Read the file successfully."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in runtime.session["history"])
@@ -97,7 +102,7 @@ def test_approval_denial_stops_before_the_model_can_try_an_alternative_command(t
         approval_policy="never",
     )
 
-    answer = runtime.ask("Delete README.md")
+    answer = run_query(runtime, "Delete README.md")
 
     assert answer == "Operation was not executed because approval was denied."
     assert runtime.current_task_state.stop_reason == STOP_REASON_APPROVAL_DENIED
@@ -114,10 +119,10 @@ def test_agent_updates_task_summary_on_each_request(tmp_path):
         ],
     )
 
-    assert runtime.ask("First request") == "First pass."
+    assert run_query(runtime, "First request") == "First pass."
     assert runtime.session["memory"]["working"]["task_summary"] == "First request"
 
-    assert runtime.ask("Second request") == "Second pass."
+    assert run_query(runtime, "Second request") == "Second pass."
     assert runtime.session["memory"]["working"]["task_summary"] == "Second request"
 
 
@@ -132,7 +137,7 @@ def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
         ],
     )
 
-    assert runtime.ask("Read the file and remember the fact") == "Done."
+    assert run_query(runtime, "Read the file and remember the fact") == "Done."
     notes = runtime.session["memory"]["episodic_notes"]
     assert any("deploy key is red" in note["text"] for note in notes)
     assert not any(note["text"] == "Done." for note in notes)
@@ -146,7 +151,7 @@ def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
         approval_policy="auto",
     )
 
-    assert resumed.ask("What color is the deploy key?") == "It is red."
+    assert run_query(resumed, "What color is the deploy key?") == "It is red."
     prompt = resumed.model_client.prompts[-1]
     assert "Relevant memories:\n- none" in prompt
     assert any("deploy key is red" in note["text"] for note in resumed.memory.to_dict()["episodic_notes"])
@@ -186,7 +191,7 @@ def test_agent_retries_after_empty_model_output(tmp_path):
         ],
     )
 
-    answer = runtime.ask("Do the task")
+    answer = run_query(runtime, "Do the task")
 
     assert answer == "Recovered after retry."
     notices = [item["content"] for item in runtime.session["history"] if item["role"] == "assistant"]
@@ -204,7 +209,7 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
         ],
     )
 
-    answer = runtime.ask("Inspect hello.txt")
+    answer = run_query(runtime, "Inspect hello.txt")
 
     assert answer == "Recovered after malformed tool output."
     assert any(item["role"] == "tool" and item["name"] == "read_file" for item in runtime.session["history"])
@@ -221,7 +226,7 @@ def test_agent_accepts_xml_write_file_tool(tmp_path):
         ],
     )
 
-    answer = runtime.ask("Create hello.py")
+    answer = run_query(runtime, "Create hello.py")
 
     assert answer == "Done."
     assert (tmp_path / "hello.py").read_text(encoding="utf-8") == 'print("hi")\n'
@@ -238,14 +243,14 @@ def test_retries_do_not_consume_the_whole_budget(tmp_path):
         max_steps=1,
     )
 
-    answer = runtime.ask("Do the task")
+    answer = run_query(runtime, "Do the task")
 
     assert answer == "Recovered after several retries."
 
 
 def test_agent_saves_and_resumes_session(tmp_path):
     runtime = build_agent(tmp_path, ["<final>First pass.</final>"])
-    assert runtime.ask("Start a session") == "First pass."
+    assert run_query(runtime, "Start a session") == "First pass."
 
     resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
@@ -256,7 +261,7 @@ def test_agent_saves_and_resumes_session(tmp_path):
     )
 
     assert resumed.session["history"][0]["content"] == "Start a session"
-    assert resumed.ask("Continue") == "Resumed."
+    assert run_query(resumed, "Continue") == "Resumed."
 
 
 def test_delegate_uses_child_agent(tmp_path):
@@ -269,7 +274,7 @@ def test_delegate_uses_child_agent(tmp_path):
         ],
     )
 
-    answer = runtime.ask("Use delegation")
+    answer = run_query(runtime, "Use delegation")
 
     assert answer == "Parent incorporated the child result."
     tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
@@ -339,7 +344,7 @@ def test_large_tool_result_is_persisted_in_current_run(tmp_path):
         ],
     )
 
-    assert runtime.ask("Generate a large command result") == "Done."
+    assert run_query(runtime, "Generate a large command result") == "Done."
 
     result_path = runtime.current_run_dir / "tool-results" / "001-run_shell.txt"
     assert result_path.exists()
@@ -622,7 +627,7 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
         approval_policy="auto",
     )
 
-    assert runtime.ask("Read the README") == "Native result"
+    assert run_query(runtime, "Read the README") == "Native result"
     assert len(client.requests) == 2
 
 
@@ -692,7 +697,7 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
 
     runtime.tool_executor.execute_async = execute_async
     try:
-        assert runtime.ask("Inspect and update the project") == "Completed"
+        assert run_query(runtime, "Inspect and update the project") == "Completed"
         assert client.executed_tools == ["list_files", "search", "write_file", "read_file"]
     finally:
         read_file.concurrency_safe = original_concurrency_safe
@@ -722,7 +727,7 @@ def test_agent_interrupt_persists_user_interrupted_run(tmp_path):
         approval_policy="auto",
     )
 
-    assert runtime.ask("Stop this request") == "Interrupted by user."
+    assert run_query(runtime, "Stop this request") == "Interrupted by user."
     assert runtime.current_task_state.stop_reason == STOP_REASON_USER_INTERRUPTED
     report = json.loads(runtime.run_store.report_path(runtime.current_task_state).read_text(encoding="utf-8"))
     assert report["stop_reason"] == STOP_REASON_USER_INTERRUPTED
@@ -1168,7 +1173,7 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
         ],
     )
 
-    assert runtime.ask("Do the thing") == "Finished."
+    assert run_query(runtime, "Do the thing") == "Finished."
 
     runs_root = tmp_path / ".nano" / "runs"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
@@ -1207,7 +1212,7 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
             ],
         )
 
-        assert runtime.ask("Mask the secret") == "Masked."
+        assert run_query(runtime, "Mask the secret") == "Masked."
 
     runs_root = tmp_path / ".nano" / "runs"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
@@ -1247,7 +1252,7 @@ def test_prompt_metadata_preserves_full_sections(tmp_path):
             }
         )
 
-    assert runtime.ask("recall") == "Done."
+    assert run_query(runtime, "recall") == "Done."
 
     trace_events = [
         json.loads(line)
@@ -1317,7 +1322,7 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
         approval_policy="auto",
     )
 
-    assert resumed.ask("Continue the task") == "Resumed."
+    assert run_query(resumed, "Continue the task") == "Resumed."
 
     prompt = resumed.model_client.prompts[-1]
     assert "Task checkpoint:" in prompt
@@ -1363,7 +1368,7 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
         approval_policy="auto",
     )
 
-    assert resumed.ask("Continue the task") == "Resumed."
+    assert run_query(resumed, "Continue the task") == "Resumed."
 
     assert "runtime.py" not in resumed.memory.to_dict()["file_summaries"]
     assert resumed.last_prompt_metadata["resume_status"] == "partial-stale"
@@ -1419,7 +1424,7 @@ def test_resume_ignores_workspace_fingerprint_when_checkpoint_runtime_identity_i
         approval_policy="auto",
     )
 
-    assert resumed.ask("Continue the task") == "Resumed."
+    assert run_query(resumed, "Continue the task") == "Resumed."
     assert resumed.last_prompt_metadata["resume_status"] == "full-valid"
 
 
@@ -1432,7 +1437,7 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
         ],
     )
 
-    assert runtime.ask("Create notes.txt") == "Done."
+    assert run_query(runtime, "Create notes.txt") == "Done."
 
     trace_events = [
         json.loads(line)
@@ -1481,7 +1486,7 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
         approval_policy="auto",
     )
 
-    assert resumed.ask("Continue the task") == "Resumed."
+    assert run_query(resumed, "Continue the task") == "Resumed."
     assert resumed.last_prompt_metadata["resume_status"] == "schema-mismatch"
 
 
@@ -1498,7 +1503,7 @@ def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_pat
         approval_policy="auto",
     )
 
-    assert resumed.ask("Continue the task") == "Resumed."
+    assert run_query(resumed, "Continue the task") == "Resumed."
     assert resumed.last_prompt_metadata["resume_status"] == "no-checkpoint"
     assert "Task checkpoint:" not in resumed.model_client.prompts[-1]
 
@@ -1532,7 +1537,7 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
     runtime.session_store.save(runtime.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
-    assert runtime.ask("Continue the task") == "Resumed."
+    assert run_query(runtime, "Continue the task") == "Resumed."
 
     trace_events = [
         json.loads(line)
@@ -1617,7 +1622,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
         feature_flags={"memory": True, "relevant_memory": False},
     )
 
-    resumed.ask("Continue the task")
+    run_query(resumed, "Continue the task")
 
     assert resumed.last_prompt_metadata["resume_status"] == "workspace-mismatch"
     assert resumed.last_prompt_metadata["runtime_identity_mismatch_fields"] == [
@@ -1706,7 +1711,7 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
         approval_policy="auto",
     )
 
-    assert runtime.ask("Cache aware run") == "Done."
+    assert run_query(runtime, "Cache aware run") == "Done."
 
     assert runtime.last_prompt_metadata["prompt_cache_supported"] is True
     assert runtime.last_prompt_metadata["cached_tokens"] == 512
@@ -1727,7 +1732,7 @@ def test_streaming_conversation_retains_messages_until_auto_compact(tmp_path):
     runtime.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
     runtime.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
 
-    assert runtime.ask("Check the transcript") == "Done."
+    assert run_query(runtime, "Check the transcript") == "Done."
 
     prompt = runtime.model_client.prompts[-1]
 

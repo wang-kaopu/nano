@@ -84,6 +84,46 @@ pip install -e .
 uv run pyright
 ```
 
+## 以代码启动
+
+除 CLI 外，也可以通过对象化的 `run_agent` 异步事件流启动 runtime。`AgentDefinition`
+集中定义模型、工作区、工具白名单和 agent 指令；每次执行再传入用户消息、工具上下文、
+后台标记、fork 的精确工具继承标记与循环上限。
+
+```python
+from nano import AgentDefinition, run_agent
+
+definition = AgentDefinition(
+    model_client=model_client,
+    workspace=workspace,
+    session_store=session_store,
+    tools=("read_file", "search"),
+    instructions="只分析代码，不修改文件。",
+)
+
+async for event in run_agent(
+    agent_definition=definition,
+    prompt_messages=[{"role": "user", "content": "检查认证流程"}],
+    tool_use_context=None,
+    use_exact_tools=True,
+    max_turns=8,
+):
+    handle(event)
+```
+
+`run_agent` 产出 `QueryEvent`，并始终在独立 asyncio Task 中执行运行循环。`max_turns`
+限制模型循环次数；`use_exact_tools=True` 时，delegate fork 仅继承当前 `tools` 白名单。
+
+运行中的父 agent 可以异步启动只读子 agent，并按需要等待它的最终结论。子 agent 会在
+自己的 Task 中消费和处理完整的 QueryLoop 事件流，不会通过同步调用阻塞父 agent：
+
+```python
+subagent = await parent_runtime.start_subagent({"task": "检查认证流程", "max_steps": 3})
+
+# 父 agent 可在此期间继续执行其他异步工作。
+result = await subagent.wait()
+```
+
 ## 快速开始
 
 在当前仓库里启动交互模式。默认 provider 是 DeepSeek：

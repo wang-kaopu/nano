@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, AsyncIterator
 
 from nano.memory import memory as memorylib
 from nano.runtime.query_events import QueryEvent
@@ -181,7 +180,11 @@ class QueryLoop:
                 for tool in self.runtime.tools.values()
             ]
         native_input: list[dict[str, Any]] = []
-        while self.task_state.tool_steps < self.runtime.max_steps and self.task_state.attempts < self.max_attempts:
+        while (
+            self.task_state.tool_steps < self.runtime.max_steps
+            and self.task_state.attempts < self.max_attempts
+            and self.task_state.attempts < self.runtime.max_turns
+        ):
             try:
                 auto_compacted = await self._auto_compact(native_tool_call_protocol)
             except RuntimeError as exc:
@@ -400,7 +403,9 @@ class QueryLoop:
             yield QueryEvent("final", {"answer": final})
             return
 
-        if self.task_state.attempts >= self.max_attempts and self.task_state.tool_steps < self.runtime.max_steps:
+        if self.task_state.attempts >= self.runtime.max_turns:
+            yield QueryEvent("stopped", {"reason": "turn_limit_reached"})
+        elif self.task_state.attempts >= self.max_attempts and self.task_state.tool_steps < self.runtime.max_steps:
             yield QueryEvent("stopped", {"reason": "retry_limit_reached"})
         else:
             yield QueryEvent("stopped", {"reason": "step_limit_reached"})

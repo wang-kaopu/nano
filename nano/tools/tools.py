@@ -4,11 +4,11 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import asyncio
 import shutil
 import subprocess
 import textwrap
-from collections.abc import Callable, Mapping
-from typing import Annotated, Any, Type
+from typing import Annotated, Any, Callable, Mapping, Type
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -113,18 +113,20 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         input_schema: Type[ToolArguments],
         description_text: str,
         prompt_text: str,
-        runner: Callable[[ToolContext, ToolArgumentsPayload], str],
+        runner: Callable[[ToolContext, ToolArgumentsPayload], str] | None,
         read_only: bool,
         concurrency_safe: bool,
         destructive: bool = False,
         approval_required: Callable[[ToolArguments, ToolContext | None], bool] | None = None,
         aliases: tuple[str, ...] = (),
+        async_runner: Callable[[ToolContext, ToolArgumentsPayload], Any] | None = None,
     ) -> None:
         """初始化由已有工作区执行函数驱动的工具。"""
         super().__init__(name=name, input_schema=input_schema, aliases=aliases)
         self.description_text = description_text
         self.prompt_text = prompt_text
         self.runner = runner
+        self.async_runner = async_runner
         self.read_only = read_only
         self.concurrency_safe = concurrency_safe
         self.destructive = destructive
@@ -181,11 +183,34 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         on_progress: ProgressCallback | None = None,
     ) -> ToolResult[str]:
         """执行已通过权限检查的底层工作区工具。"""
+        if self.runner is None:
+            raise RuntimeError(f"tool '{self.name}' must be executed asynchronously")
         if not can_use_tool(self, args):
             raise PermissionError(f"tool '{self.name}' is not allowed in this run")
         if on_progress is not None:
             on_progress(ToolProgressData(stage="running"))
         output = self.runner(context, args.model_dump(mode="python"))
+        progress = ToolProgressData(stage="completed")
+        if on_progress is not None:
+            on_progress(progress)
+        return ToolResult(output=output, content=output, progress=progress)
+
+    async def call_async(
+        self,
+        args: ToolArguments,
+        context: ToolContext,
+        can_use_tool: CanUseTool,
+        parent_message: str | None,
+        on_progress: ProgressCallback | None = None,
+    ) -> ToolResult[str]:
+        """异步执行工具；未提供异步 runner 时转入工作线程运行同步实现。"""
+        if self.async_runner is None:
+            return await asyncio.to_thread(self.call, args, context, can_use_tool, parent_message, on_progress)
+        if not can_use_tool(self, args):
+            raise PermissionError(f"tool '{self.name}' is not allowed in this run")
+        if on_progress is not None:
+            on_progress(ToolProgressData(stage="running"))
+        output = await self.async_runner(context, args.model_dump(mode="python"))
         progress = ToolProgressData(stage="completed")
         if on_progress is not None:
             on_progress(progress)
@@ -467,13 +492,14 @@ def tool_patch_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     return f"patched {path.relative_to(context.root)}"
 
 
-def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
+async def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
+    """异步启动只读子 agent，并等待它返回调查结论。"""
     if context.depth >= context.max_depth:
         raise ValueError("delegate depth exceeded")
     task = str(args.get("task", "")).strip()
     if not task:
         raise ValueError("task must not be empty")
-    return context.spawn_delegate(args)
+    return await context.spawn_delegate(args)
 
 
 def tool_skill(context: ToolContext, args: ToolArgumentsPayload) -> str:
@@ -550,7 +576,8 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
         input_schema=DelegateArguments,
         description_text="Ask a bounded read-only child agent to investigate.",
         prompt_text="Use delegate for bounded read-only investigation when a separate exploration pass helps.",
-        runner=tool_delegate,
+        runner=None,
+        async_runner=tool_delegate,
         read_only=True,
         concurrency_safe=False,
     ),
