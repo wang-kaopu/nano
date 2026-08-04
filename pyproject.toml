@@ -37,3 +37,7 @@ nano = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+  "integration: 执行 benchmark 或 ablation 的端到端测试；默认跳过。",
+]

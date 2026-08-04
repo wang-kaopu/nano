@@ -1,4 +1,4 @@
-from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
+from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext
 from nano.runtime.agent_loop import QueryEngine
 
 
@@ -6,7 +6,7 @@ def build_agent(tmp_path, outputs):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
-    return Nano(
+    return AgentRuntime(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
@@ -16,7 +16,7 @@ def build_agent(tmp_path, outputs):
 
 def test_query_engine_runs_same_control_flow_as_nano_ask(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":1}}</tool>',
@@ -24,24 +24,24 @@ def test_query_engine_runs_same_control_flow_as_nano_ask(tmp_path):
         ],
     )
 
-    answer = QueryEngine(agent).run("Inspect hello.txt")
+    answer = QueryEngine(runtime).run("Inspect hello.txt")
 
     assert answer == "Done."
-    assert agent.current_task_state.status == "completed"
-    assert agent.run_store.report_path(agent.current_task_state.run_id).exists()
+    assert runtime.current_task_state.status == "completed"
+    assert runtime.run_store.report_path(runtime.current_task_state.run_id).exists()
 
 
 def test_nano_ask_delegates_to_query_engine(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Facade works.</final>"])
+    runtime = build_agent(tmp_path, ["<final>Facade works.</final>"])
 
-    assert agent.ask("Use facade") == "Facade works."
+    assert runtime.ask("Use facade") == "Facade works."
 
 
 def test_query_engine_forwards_text_deltas_to_event_callback(tmp_path):
-    agent = build_agent(tmp_path, [["<final>", "Streamed ", "answer.</final>"]])
+    runtime = build_agent(tmp_path, [["<final>", "Streamed ", "answer.</final>"]])
     events = []
 
-    answer = QueryEngine(agent).run("Respond in chunks", event_callback=events.append)
+    answer = QueryEngine(runtime).run("Respond in chunks", event_callback=events.append)
 
     assert answer == "Streamed answer."
     assert [event.payload["text"] for event in events if event.type == "text_delta"] == ["<final>", "Streamed ", "answer.</final>"]

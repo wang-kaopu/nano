@@ -12,6 +12,7 @@ import shutil
 import sys
 import textwrap
 import time
+from collections.abc import Callable, Sequence
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import has_completions
@@ -25,7 +26,7 @@ from prompt_toolkit.widgets import Dialog, Label, RadioList
 from nano.config import load_project_env, provider_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from nano.runtime.query_events import QueryEvent
-from nano.runtime.runtime import Nano
+from nano.runtime.runtime import AgentRuntime
 from nano.skills import get_skill_by_name, resolve_skill_prompt, discover_skills
 from nano.storage.session_store import SessionStore
 from nano.utils.text import middle
@@ -80,9 +81,9 @@ SECRET_ENV_NAMES_VAR = "NANO_SECRET_ENV_NAMES"
 class _DoubleCtrlCInterruptHandler:
     """要求连续两次 Ctrl-C 才取消当前请求，避免误触中断。"""
 
-    def __init__(self, agent, clock=time.monotonic) -> None:
+    def __init__(self, runtime: AgentRuntime, clock: Callable[[], float] = time.monotonic) -> None:
         """绑定当前 agent 和用于判定连续按键间隔的时钟。"""
-        self.agent = agent
+        self.runtime = runtime
         self.clock = clock
         self.first_interrupt_at = None
 
@@ -91,7 +92,7 @@ class _DoubleCtrlCInterruptHandler:
         del signum, frame
         interrupt_at = self.clock()
         if self.first_interrupt_at is not None and interrupt_at - self.first_interrupt_at <= INTERRUPT_CONFIRMATION_SECONDS:
-            if self.agent.interrupt_current_request():
+            if self.runtime.interrupt_current_request():
                 print("\nInterrupting current request...", flush=True)
             self.first_interrupt_at = None
             return
@@ -169,24 +170,24 @@ class _LiveResponsePrinter:
         self.has_output = True
 
 
-def _print_streamed_response(agent, user_message: str) -> None:
+def _print_streamed_response(runtime: AgentRuntime, user_message: str) -> None:
     """执行请求并实时打印模型回答，流结束后补齐终端换行。"""
     printer = _LiveResponsePrinter()
-    answer = agent.ask(user_message, event_callback=printer)
+    answer = runtime.ask(user_message, event_callback=printer)
     if printer.has_output:
         print()
         return
     print(answer)
 
 
-def _resolve_user_skill_command(agent, user_input: str) -> tuple[str, str] | None:
+def _resolve_user_skill_command(runtime: AgentRuntime, user_input: str) -> tuple[str, str] | None:
     """识别用户 `/skill 参数` 输入，并返回已展开的 Skill 提示词。"""
     if not user_input.startswith("/"):
         return None
     space_index = user_input.find(" ")
     command_name = user_input[1:space_index] if space_index > 0 else user_input[1:]
     command_args = user_input[space_index + 1 :] if space_index > 0 else ""
-    skill = get_skill_by_name(command_name, agent.root)
+    skill = get_skill_by_name(command_name, runtime.root)
     if skill is None or not skill.user_invocable:
         return None
     return skill.name, resolve_skill_prompt(skill, command_args)
@@ -298,7 +299,7 @@ def _build_model_client(args):
     raise ValueError(f"Unsupported provider: {provider}")
 
 
-def build_welcome(agent, model, host):
+def build_welcome(runtime: AgentRuntime, model: str, host: str) -> str:
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
@@ -334,17 +335,17 @@ def build_welcome(agent, model, host):
             center(WELCOME_STATUS),
             divider("-"),
             row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
+            row("WORKSPACE  " + middle(runtime.workspace.cwd, inner - 11)),
+            pair("MODEL", model, "BRANCH", runtime.workspace.branch),
+            pair("APPROVAL", runtime.approval_policy, "SESSION", runtime.session["id"]),
             row(""),
         ]
     )
     return "\n".join([line, *rows, line])
 
 
-def build_agent(args):
-    """根据 CLI 参数装配出一个可运行的 Nano 实例。
+def build_agent(args: argparse.Namespace) -> AgentRuntime:
+    """根据 CLI 参数装配出一个可运行的 AgentRuntime 实例。
 
     为什么存在：
     命令行参数只是字符串和开关，runtime 需要的是已经装配好的对象图：
@@ -353,7 +354,7 @@ def build_agent(args):
 
     输入 / 输出：
     - 输入：`argparse` 解析后的 `args`
-    - 输出：一个新的 `Nano`，或一个从旧 session 恢复出来的 `Nano`
+    - 输出：一个新的 `AgentRuntime`，或一个从旧 session 恢复出来的 `AgentRuntime`
 
     在 agent 链路里的位置：
     它是整个程序启动链路里最靠近 runtime 的装配点。`main()` 先调它，
@@ -370,7 +371,7 @@ def build_agent(args):
     if session_id == "latest":
         session_id = store.latest()
     if session_id:
-        return Nano.from_session(
+        return AgentRuntime.from_session(
             model_client=model,
             workspace=workspace,
             session_store=store,
@@ -380,7 +381,7 @@ def build_agent(args):
             max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
         )
-    return Nano(
+    return AgentRuntime(
         model_client=model,
         workspace=workspace,
         session_store=store,
@@ -421,13 +422,13 @@ def build_arg_parser():
     return parser
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
+    runtime = build_agent(args)
 
-    model = agent.model_client.model
-    host = agent.model_client.base_url
-    print(build_welcome(agent, model=model, host=host))
+    model = runtime.model_client.model
+    host = runtime.model_client.base_url
+    print(build_welcome(runtime, model=model, host=host))
 
     if args.prompt:
         # one-shot 模式：只跑一次 ask，不进入 REPL 循环。
@@ -436,9 +437,9 @@ def main(argv=None):
             print()
             try:
                 previous_handler = signal.getsignal(signal.SIGINT)
-                signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
+                signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(runtime))
                 try:
-                    _print_streamed_response(agent, prompt)
+                    _print_streamed_response(runtime, prompt)
                 finally:
                     signal.signal(signal.SIGINT, previous_handler)
             except RuntimeError as exc:
@@ -448,7 +449,7 @@ def main(argv=None):
 
     prompt_session = PromptSession(
         completer=WordCompleter(
-            [*SLASH_COMMANDS, *(f"/{skill.name}" for skill in discover_skills(agent.root) if skill.user_invocable)],
+            [*SLASH_COMMANDS, *(f"/{skill.name}" for skill in discover_skills(runtime.root) if skill.user_invocable)],
             sentence=True,
         ),
         complete_while_typing=True,
@@ -472,7 +473,7 @@ def main(argv=None):
             print(HELP_DETAILS)
             continue
         if user_input == "/memory":
-            memories = agent.memory.list_file_memories()
+            memories = runtime.memory.list_file_memories()
             if not memories:
                 print("No memories saved yet.")
             else:
@@ -481,10 +482,10 @@ def main(argv=None):
                     print(f"    [{memory.type}] {memory.name} - {memory.description}")
             continue
         if user_input == "/session":
-            print(agent.session_path)
+            print(runtime.session_path)
             continue
         if user_input == "/resume":
-            sessions = agent.session_store.list_summaries()
+            sessions = runtime.session_store.list_summaries()
             if not sessions:
                 print("No saved sessions.")
                 continue
@@ -513,31 +514,31 @@ def main(argv=None):
             session_id = session_app.run()
             if not session_id:
                 continue
-            agent = Nano.from_session(
-                model_client=agent.model_client,
-                workspace=agent.workspace,
-                session_store=agent.session_store,
+            runtime = AgentRuntime.from_session(
+                model_client=runtime.model_client,
+                workspace=runtime.workspace,
+                session_store=runtime.session_store,
                 session_id=session_id,
-                run_store=agent.run_store,
-                approval_policy=agent.approval_policy,
-                max_steps=agent.max_steps,
-                max_new_tokens=agent.max_new_tokens,
-                depth=agent.depth,
-                max_depth=agent.max_depth,
-                read_only=agent.read_only,
-                shell_env_allowlist=agent.shell_env_allowlist,
-                secret_env_names=agent.secret_env_names,
-                feature_flags=agent.feature_flags,
-                allowed_tools=agent.allowed_tools,
+                run_store=runtime.run_store,
+                approval_policy=runtime.approval_policy,
+                max_steps=runtime.max_steps,
+                max_new_tokens=runtime.max_new_tokens,
+                depth=runtime.depth,
+                max_depth=runtime.max_depth,
+                read_only=runtime.read_only,
+                shell_env_allowlist=runtime.shell_env_allowlist,
+                secret_env_names=runtime.secret_env_names,
+                feature_flags=runtime.feature_flags,
+                allowed_tools=runtime.allowed_tools,
             )
             print(f"Resumed session {session_id}.")
             continue
         if user_input == "/reset":
-            agent.reset()
+            runtime.reset()
             print("session reset")
             continue
 
-        skill_command = _resolve_user_skill_command(agent, user_input)
+        skill_command = _resolve_user_skill_command(runtime, user_input)
         if skill_command is not None:
             skill_name, resolved_prompt = skill_command
             print(f"Invoking skill: {skill_name}")
@@ -546,9 +547,9 @@ def main(argv=None):
         print()
         try:
             previous_handler = signal.getsignal(signal.SIGINT)
-            signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(agent))
+            signal.signal(signal.SIGINT, _DoubleCtrlCInterruptHandler(runtime))
             try:
-                _print_streamed_response(agent, user_input)
+                _print_streamed_response(runtime, user_input)
             finally:
                 signal.signal(signal.SIGINT, previous_handler)
         except RuntimeError as exc:

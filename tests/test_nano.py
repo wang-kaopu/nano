@@ -12,7 +12,7 @@ import nano as nano_pkg
 from nano import (
     AnthropicCompatibleModelClient,
     FakeModelClient,
-    Nano,
+    AgentRuntime,
     OpenAICompatibleModelClient,
     SessionStore,
     WorkspaceContext,
@@ -32,7 +32,7 @@ def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
-    return Nano(
+    return AgentRuntime(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
@@ -42,7 +42,7 @@ def build_agent(tmp_path, outputs, **kwargs):
 
 
 def configure_mock_model_client(client):
-    """补齐构造 Nano 所需的模型客户端协议字段。"""
+    """补齐构造 AgentRuntime 所需的模型客户端协议字段。"""
     client.model = "mock-model"
     client.base_url = ""
     client.supports_prompt_cache = False
@@ -71,7 +71,7 @@ def patch_httpx_post(fake_urlopen):
 
 def test_agent_runs_tool_then_final(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}</tool>',
@@ -79,16 +79,16 @@ def test_agent_runs_tool_then_final(tmp_path):
         ],
     )
 
-    answer = agent.ask("Inspect hello.txt")
+    answer = runtime.ask("Inspect hello.txt")
 
     assert answer == "Read the file successfully."
-    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
-    assert "hello.txt" in agent.session["memory"]["working"]["recent_files"]
+    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in runtime.session["history"])
+    assert "hello.txt" in runtime.session["memory"]["working"]["recent_files"]
 
 
 def test_approval_denial_stops_before_the_model_can_try_an_alternative_command(tmp_path):
     """拒绝危险命令后必须结束运行，不能给模型第二次绕过审批的机会。"""
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"run_shell","args":{"command":"git rm -f README.md","timeout":20}}</tool>',
@@ -97,16 +97,16 @@ def test_approval_denial_stops_before_the_model_can_try_an_alternative_command(t
         approval_policy="never",
     )
 
-    answer = agent.ask("Delete README.md")
+    answer = runtime.ask("Delete README.md")
 
     assert answer == "Operation was not executed because approval was denied."
-    assert agent.current_task_state.stop_reason == STOP_REASON_APPROVAL_DENIED
-    assert len(agent.model_client.prompts) == 1
+    assert runtime.current_task_state.stop_reason == STOP_REASON_APPROVAL_DENIED
+    assert len(runtime.model_client.prompts) == 1
     assert (tmp_path / "README.md").exists()
 
 
 def test_agent_updates_task_summary_on_each_request(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             "<final>First pass.</final>",
@@ -114,16 +114,16 @@ def test_agent_updates_task_summary_on_each_request(tmp_path):
         ],
     )
 
-    assert agent.ask("First request") == "First pass."
-    assert agent.session["memory"]["working"]["task_summary"] == "First request"
+    assert runtime.ask("First request") == "First pass."
+    assert runtime.session["memory"]["working"]["task_summary"] == "First request"
 
-    assert agent.ask("Second request") == "Second pass."
-    assert agent.session["memory"]["working"]["task_summary"] == "Second request"
+    assert runtime.ask("Second request") == "Second pass."
+    assert runtime.session["memory"]["working"]["task_summary"] == "Second request"
 
 
 def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
     (tmp_path / "facts.txt").write_text("deploy key is red\n", encoding="utf-8")
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"read_file","args":{"path":"facts.txt","start":1,"end":1}}</tool>',
@@ -132,17 +132,17 @@ def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
         ],
     )
 
-    assert agent.ask("Read the file and remember the fact") == "Done."
-    notes = agent.session["memory"]["episodic_notes"]
+    assert runtime.ask("Read the file and remember the fact") == "Done."
+    notes = runtime.session["memory"]["episodic_notes"]
     assert any("deploy key is red" in note["text"] for note in notes)
     assert not any(note["text"] == "Done." for note in notes)
     assert not any(note["text"] == "Done." for note in notes)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>It is red.</final>"]),
-        workspace=agent.workspace,
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        workspace=runtime.workspace,
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -155,20 +155,20 @@ def test_agent_keeps_read_facts_in_session_working_memory(tmp_path):
 def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    agent.memory.set_file_summary("./sample.txt", "sample.txt: alpha")
-    agent.memory.remember_file("./sample.txt")
-    assert agent.memory.to_dict()["file_summaries"]["sample.txt"]["freshness"]
+    runtime.memory.set_file_summary("./sample.txt", "sample.txt: alpha")
+    runtime.memory.remember_file("./sample.txt")
+    assert runtime.memory.to_dict()["file_summaries"]["sample.txt"]["freshness"]
 
-    assert "sample.txt: alpha" in agent.memory.render_memory_text()
+    assert "sample.txt: alpha" in runtime.memory.render_memory_text()
     file_path.write_text("beta\n", encoding="utf-8")
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient([]),
-        workspace=agent.workspace,
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        workspace=runtime.workspace,
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -178,7 +178,7 @@ def test_file_summary_cache_is_invalidated_on_out_of_band_edit_and_path_spelling
 
 
 def test_agent_retries_after_empty_model_output(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             "",
@@ -186,16 +186,16 @@ def test_agent_retries_after_empty_model_output(tmp_path):
         ],
     )
 
-    answer = agent.ask("Do the task")
+    answer = runtime.ask("Do the task")
 
     assert answer == "Recovered after retry."
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    notices = [item["content"] for item in runtime.session["history"] if item["role"] == "assistant"]
     assert any("empty response" in item for item in notices)
 
 
 def test_agent_retries_after_malformed_tool_payload(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"read_file","args":"bad"}</tool>',
@@ -204,16 +204,16 @@ def test_agent_retries_after_malformed_tool_payload(tmp_path):
         ],
     )
 
-    answer = agent.ask("Inspect hello.txt")
+    answer = runtime.ask("Inspect hello.txt")
 
     assert answer == "Recovered after malformed tool output."
-    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in agent.session["history"])
-    notices = [item["content"] for item in agent.session["history"] if item["role"] == "assistant"]
+    assert any(item["role"] == "tool" and item["name"] == "read_file" for item in runtime.session["history"])
+    notices = [item["content"] for item in runtime.session["history"] if item["role"] == "assistant"]
     assert any("valid <tool> call" in item for item in notices)
 
 
 def test_agent_accepts_xml_write_file_tool(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool name="write_file" path="hello.py"><content>print("hi")\n</content></tool>',
@@ -221,14 +221,14 @@ def test_agent_accepts_xml_write_file_tool(tmp_path):
         ],
     )
 
-    answer = agent.ask("Create hello.py")
+    answer = runtime.ask("Create hello.py")
 
     assert answer == "Done."
     assert (tmp_path / "hello.py").read_text(encoding="utf-8") == 'print("hi")\n'
 
 
 def test_retries_do_not_consume_the_whole_budget(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             "",
@@ -238,20 +238,20 @@ def test_retries_do_not_consume_the_whole_budget(tmp_path):
         max_steps=1,
     )
 
-    answer = agent.ask("Do the task")
+    answer = runtime.ask("Do the task")
 
     assert answer == "Recovered after several retries."
 
 
 def test_agent_saves_and_resumes_session(tmp_path):
-    agent = build_agent(tmp_path, ["<final>First pass.</final>"])
-    assert agent.ask("Start a session") == "First pass."
+    runtime = build_agent(tmp_path, ["<final>First pass.</final>"])
+    assert runtime.ask("Start a session") == "First pass."
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
-        workspace=agent.workspace,
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        workspace=runtime.workspace,
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -260,7 +260,7 @@ def test_agent_saves_and_resumes_session(tmp_path):
 
 
 def test_delegate_uses_child_agent(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"delegate","args":{"task":"inspect README","max_steps":2}}</tool>',
@@ -269,10 +269,10 @@ def test_delegate_uses_child_agent(tmp_path):
         ],
     )
 
-    answer = agent.ask("Use delegation")
+    answer = runtime.ask("Use delegation")
 
     assert answer == "Parent incorporated the child result."
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
+    tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate"
     assert "delegate_result" in tool_events[0]["content"]
 
@@ -280,10 +280,10 @@ def test_delegate_uses_child_agent(tmp_path):
 def test_patch_file_replaces_exact_match(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("hello world\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
-    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
+    runtime = build_agent(tmp_path, [])
+    runtime.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
 
-    result = agent.run_tool(
+    result = runtime.run_tool(
         "patch_file",
         {
             "path": "sample.txt",
@@ -299,10 +299,10 @@ def test_patch_file_replaces_exact_match(tmp_path):
 def test_existing_file_requires_read_before_modification(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("original\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    write_result = agent.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
-    patch_result = agent.run_tool("patch_file", {"path": "sample.txt", "old_text": "original", "new_text": "replacement"})
+    write_result = runtime.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
+    patch_result = runtime.run_tool("patch_file", {"path": "sample.txt", "old_text": "original", "new_text": "replacement"})
 
     assert "must read this file before modifying it" in write_result
     assert "must read this file before modifying it" in patch_result
@@ -312,26 +312,26 @@ def test_existing_file_requires_read_before_modification(tmp_path):
 def test_file_modification_requires_fresh_read_and_tracks_agent_writes(tmp_path):
     file_path = tmp_path / "sample.txt"
     file_path.write_text("original\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
+    runtime.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
     external_mtime = file_path.stat().st_mtime_ns + 1_000_000_000
     file_path.write_text("external\n", encoding="utf-8")
     os.utime(file_path, ns=(external_mtime, external_mtime))
 
-    stale_result = agent.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
+    stale_result = runtime.run_tool("write_file", {"path": "sample.txt", "content": "replacement\n"})
     assert "file was modified externally" in stale_result
     assert file_path.read_text(encoding="utf-8") == "external\n"
 
-    agent.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
-    assert agent.run_tool("write_file", {"path": "sample.txt", "content": "first\n"}) == "wrote sample.txt (6 chars)"
-    assert agent.run_tool("write_file", {"path": "sample.txt", "content": "second\n"}) == "wrote sample.txt (7 chars)"
+    runtime.run_tool("read_file", {"path": "sample.txt", "start": 1, "end": 1})
+    assert runtime.run_tool("write_file", {"path": "sample.txt", "content": "first\n"}) == "wrote sample.txt (6 chars)"
+    assert runtime.run_tool("write_file", {"path": "sample.txt", "content": "second\n"}) == "wrote sample.txt (7 chars)"
 
 
 def test_large_tool_result_is_persisted_in_current_run(tmp_path):
     script = 'print("x" * 6000)'
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             f'<tool>{{"name":"run_shell","args":{{"command":{json.dumps(command)},"timeout":20}}}}</tool>',
@@ -339,26 +339,26 @@ def test_large_tool_result_is_persisted_in_current_run(tmp_path):
         ],
     )
 
-    assert agent.ask("Generate a large command result") == "Done."
+    assert runtime.ask("Generate a large command result") == "Done."
 
-    result_path = agent.current_run_dir / "tool-results" / "001-run_shell.txt"
+    result_path = runtime.current_run_dir / "tool-results" / "001-run_shell.txt"
     assert result_path.exists()
     assert len(result_path.read_text(encoding="utf-8")) > 5000
-    tool_event = next(item for item in agent.session["history"] if item["role"] == "tool")
+    tool_event = next(item for item in runtime.session["history"] if item["role"] == "tool")
     assert "Full result persisted: .nano/runs/" in tool_event["content"]
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in runtime.run_store.trace_path(runtime.current_task_state).read_text(encoding="utf-8").splitlines()
     ]
     tool_trace = next(event for event in trace_events if event["event"] == "tool_executed")
     assert tool_trace["result_artifact_path"].endswith("tool-results/001-run_shell.txt")
 
 
 def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="ask")
+    runtime = build_agent(tmp_path, [], approval_policy="ask")
 
     with patch("builtins.input") as mock_input:
-        result = agent.run_tool("write_file", {})
+        result = runtime.run_tool("write_file", {})
 
     assert result.startswith("error: invalid arguments for write_file: 2 validation errors for WriteFileArguments")
     assert 'example: <tool name="write_file"' in result
@@ -366,12 +366,12 @@ def test_invalid_risky_tool_does_not_prompt_for_approval(tmp_path):
 
 
 def test_list_files_hides_internal_agent_state(tmp_path):
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
     (tmp_path / ".nano").mkdir(exist_ok=True)
     (tmp_path / ".git").mkdir(exist_ok=True)
     (tmp_path / "hello.txt").write_text("hi\n", encoding="utf-8")
 
-    result = agent.run_tool("list_files", {})
+    result = runtime.run_tool("list_files", {})
 
     assert ".nano" not in result
     assert ".git" not in result
@@ -379,11 +379,11 @@ def test_list_files_hides_internal_agent_state(tmp_path):
 
 
 def test_repeated_identical_tool_call_is_rejected(tmp_path):
-    agent = build_agent(tmp_path, [])
-    agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "1"})
-    agent.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "2"})
+    runtime = build_agent(tmp_path, [])
+    runtime.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "1"})
+    runtime.record({"role": "tool", "name": "list_files", "args": {}, "content": "(empty)", "created_at": "2"})
 
-    result = agent.run_tool("list_files", {})
+    result = runtime.run_tool("list_files", {})
 
     assert result == "error: repeated identical tool call for list_files; choose a different tool or return a final answer"
 
@@ -615,14 +615,14 @@ def test_native_openai_tool_call_returns_function_output_to_next_request(tmp_pat
 
     client = NativeToolClient()
     workspace = build_workspace(tmp_path)
-    agent = Nano(
+    runtime = AgentRuntime(
         model_client=client,
         workspace=workspace,
         session_store=SessionStore(tmp_path / ".nano" / "sessions"),
         approval_policy="auto",
     )
 
-    assert agent.ask("Read the README") == "Native result"
+    assert runtime.ask("Read the README") == "Native result"
     assert len(client.requests) == 2
 
 
@@ -674,13 +674,13 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
 
     client = NativeToolClient()
     workspace = build_workspace(tmp_path)
-    agent = Nano(
+    runtime = AgentRuntime(
         model_client=client,
         workspace=workspace,
         session_store=SessionStore(tmp_path / ".nano" / "sessions"),
         approval_policy="auto",
     )
-    read_file = agent.tools["read_file"]
+    read_file = runtime.tools["read_file"]
     original_concurrency_safe = read_file.concurrency_safe
     read_file.concurrency_safe = False
 
@@ -690,9 +690,9 @@ def test_native_tool_calls_start_read_tools_before_stream_completes_and_queue_wr
         client.executed_tools.append(name)
         return ToolExecutionResult(content=f"{name} completed", metadata={})
 
-    agent.tool_executor.execute_async = execute_async
+    runtime.tool_executor.execute_async = execute_async
     try:
-        assert agent.ask("Inspect and update the project") == "Completed"
+        assert runtime.ask("Inspect and update the project") == "Completed"
         assert client.executed_tools == ["list_files", "search", "write_file", "read_file"]
     finally:
         read_file.concurrency_safe = original_concurrency_safe
@@ -709,24 +709,24 @@ def test_agent_interrupt_persists_user_interrupted_run(tmp_path):
             self.last_completion_metadata = {}
 
         async def stream(self, prompt, max_new_tokens, **kwargs):
-            assert agent.interrupt_current_request() is True
+            assert runtime.interrupt_current_request() is True
             await asyncio.sleep(0)
             yield ModelStreamEvent("text_delta", text="This response must not finish.")
             yield ModelStreamEvent("completed", metadata={})
 
     workspace = build_workspace(tmp_path)
-    agent = Nano(
+    runtime = AgentRuntime(
         model_client=InterruptingModelClient(),
         workspace=workspace,
         session_store=SessionStore(tmp_path / ".nano" / "sessions"),
         approval_policy="auto",
     )
 
-    assert agent.ask("Stop this request") == "Interrupted by user."
-    assert agent.current_task_state.stop_reason == STOP_REASON_USER_INTERRUPTED
-    report = json.loads(agent.run_store.report_path(agent.current_task_state).read_text(encoding="utf-8"))
+    assert runtime.ask("Stop this request") == "Interrupted by user."
+    assert runtime.current_task_state.stop_reason == STOP_REASON_USER_INTERRUPTED
+    report = json.loads(runtime.run_store.report_path(runtime.current_task_state).read_text(encoding="utf-8"))
     assert report["stop_reason"] == STOP_REASON_USER_INTERRUPTED
-    assert agent._current_query_task is None
+    assert runtime._current_query_task is None
 
 
 def test_openai_compatible_client_extracts_text_from_event_stream():
@@ -926,13 +926,13 @@ def test_build_agent_uses_openai_provider_and_model_override(tmp_path):
     ):
         with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
             fake_client = configure_mock_model_client(mock_openai.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["model"] == "override-model"
     assert mock_openai.call_args.kwargs["base_url"] == "https://www.right.codes/codex/v1"
     assert mock_openai.call_args.kwargs["api_key"] == "sk-test"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
@@ -957,11 +957,11 @@ def test_build_agent_uses_right_codes_shared_key_for_openai_provider(tmp_path):
     with patch.dict(os.environ, {"NANO_RIGHT_CODES_API_KEY": "sk-right-codes"}, clear=True):
         with patch("nano.cli.OpenAICompatibleModelClient") as mock_openai:
             fake_client = configure_mock_model_client(mock_openai.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_openai.assert_called_once()
     assert mock_openai.call_args.kwargs["api_key"] == "sk-right-codes"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_build_arg_parser_defaults_provider_to_deepseek(tmp_path):
@@ -1013,13 +1013,13 @@ def test_build_agent_uses_anthropic_provider_and_openai_key_fallback(tmp_path):
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
             fake_client = configure_mock_model_client(mock_anthropic.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "claude-sonnet-4-5-20250929"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://www.right.codes/claude/v1"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-openai-fallback"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_build_agent_uses_anthropic_default_model_when_env_is_missing(tmp_path):
@@ -1084,13 +1084,13 @@ def test_build_agent_uses_deepseek_provider_and_env_configuration(tmp_path):
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
             fake_client = configure_mock_model_client(mock_anthropic.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-project-deepseek"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_build_agent_uses_deepseek_default_model_when_env_is_missing(tmp_path):
@@ -1121,13 +1121,13 @@ def test_build_agent_uses_deepseek_provider_by_default(tmp_path):
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
             fake_client = configure_mock_model_client(mock_anthropic.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-test"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_build_agent_uses_project_env_deepseek_key_by_default(tmp_path):
@@ -1149,18 +1149,18 @@ def test_build_agent_uses_project_env_deepseek_key_by_default(tmp_path):
             side_effect=AssertionError("openai client should not be used"),
         ), patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
             fake_client = configure_mock_model_client(mock_anthropic.return_value)
-            agent = nano_pkg.build_agent(args)
+            runtime = nano_pkg.build_agent(args)
 
     mock_anthropic.assert_called_once()
     assert mock_anthropic.call_args.kwargs["model"] == "deepseek-v4-pro"
     assert mock_anthropic.call_args.kwargs["base_url"] == "https://api.deepseek.com/anthropic"
     assert mock_anthropic.call_args.kwargs["api_key"] == "sk-project-deepseek"
-    assert agent.model_client is fake_client
+    assert runtime.model_client is fake_client
 
 
 def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
     (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"read_file","args":{"path":"hello.txt","start":1,"end":2}}</tool>',
@@ -1168,7 +1168,7 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
         ],
     )
 
-    assert agent.ask("Do the thing") == "Finished."
+    assert runtime.ask("Do the thing") == "Finished."
 
     runs_root = tmp_path / ".nano" / "runs"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
@@ -1199,7 +1199,7 @@ def test_successful_run_persists_run_artifacts_and_stop_reason(tmp_path):
 def test_trace_and_report_redact_secret_env_values(tmp_path):
     secret = "sk-test-secret-123"
     with patch.dict(os.environ, {"OPENAI_API_KEY": secret}, clear=True):
-        agent = build_agent(
+        runtime = build_agent(
             tmp_path,
             [
                 '<tool>{"name":"run_shell","args":{"command":"printf \'%s\' \'sk-test-secret-123\'","timeout":20}}</tool>',
@@ -1207,7 +1207,7 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
             ],
         )
 
-        assert agent.ask("Mask the secret") == "Masked."
+        assert runtime.ask("Mask the secret") == "Masked."
 
     runs_root = tmp_path / ".nano" / "runs"
     run_dirs = [path for path in runs_root.iterdir() if path.is_dir()]
@@ -1233,13 +1233,13 @@ def test_trace_and_report_redact_secret_env_values(tmp_path):
 
 
 def test_prompt_metadata_preserves_full_sections(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done.</final>"])
-    agent.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
-    agent.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
-    agent.memory.append_note("gamma episodic note " + ("C" * 120), tags=("recall",), created_at="2026-04-07T10:02:00+00:00")
+    runtime = build_agent(tmp_path, ["<final>Done.</final>"])
+    runtime.memory.append_note("alpha episodic note " + ("A" * 120), tags=("recall",), created_at="2026-04-07T10:00:00+00:00")
+    runtime.memory.append_note("beta episodic recall note " + ("B" * 120), created_at="2026-04-07T10:01:00+00:00")
+    runtime.memory.append_note("gamma episodic note " + ("C" * 120), tags=("recall",), created_at="2026-04-07T10:02:00+00:00")
 
     for index in range(4):
-        agent.record(
+        runtime.record(
             {
                 "role": "user" if index % 2 == 0 else "assistant",
                 "content": f"history-{index}-" + ("A" * 240),
@@ -1247,16 +1247,16 @@ def test_prompt_metadata_preserves_full_sections(tmp_path):
             }
         )
 
-    assert agent.ask("recall") == "Done."
+    assert runtime.ask("recall") == "Done."
 
     trace_events = [
         json.loads(line)
-        for line in (agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines())
+        for line in (runtime.run_store.trace_path(runtime.current_task_state).read_text(encoding="utf-8").splitlines())
     ]
     prompt_events = [event for event in trace_events if event["event"] == "prompt_built"]
     assert prompt_events
     metadata = prompt_events[0]["prompt_metadata"]
-    relevant_section = agent.model_client.prompts[0].split("Relevant memories:\n", 1)[1].split("\n\nTranscript:", 1)[0]
+    relevant_section = runtime.model_client.prompts[0].split("Relevant memories:\n", 1)[1].split("\n\nTranscript:", 1)[0]
 
     assert metadata["relevant_memory"]["selected_count"] == 0
     assert metadata["relevant_memory"]["rendered_count"] == 0
@@ -1266,10 +1266,10 @@ def test_prompt_metadata_preserves_full_sections(tmp_path):
 
 
 def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    first = agent.prompt_metadata("first", "")
-    second = agent.prompt_metadata("second", "")
+    first = runtime.prompt_metadata("first", "")
+    second = runtime.prompt_metadata("second", "")
 
     assert first["prefix_hash"] == second["prefix_hash"]
     assert second["prefix_changed"] is False
@@ -1277,17 +1277,17 @@ def test_prompt_metadata_refreshes_prefix_when_workspace_changes(tmp_path):
 
     (tmp_path / "README.md").write_text("demo changed\n", encoding="utf-8")
 
-    third = agent.prompt_metadata("third", "")
+    third = runtime.prompt_metadata("third", "")
 
     assert third["prefix_hash"] != second["prefix_hash"]
     assert third["prefix_changed"] is True
     assert third["workspace_changed"] is True
-    assert "demo changed" in agent.prefix
+    assert "demo changed" in runtime.prefix
 
 
 def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_manual",
         "items": {
             "ckpt_manual": {
@@ -1307,13 +1307,13 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -1329,10 +1329,10 @@ def test_resume_prompt_uses_checkpoint_state_not_just_history(tmp_path):
 def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_path):
     file_path = tmp_path / "runtime.py"
     file_path.write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.memory.set_file_summary("runtime.py", "runtime.py: alpha")
-    freshness = agent.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.memory.set_file_summary("runtime.py", "runtime.py: alpha")
+    freshness = runtime.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_stale",
         "items": {
             "ckpt_stale": {
@@ -1348,18 +1348,18 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
                 "key_files": [{"path": "runtime.py", "freshness": freshness}],
                 "freshness": {"runtime.py": freshness},
                 "summary": "runtime.py is important",
-                "runtime_identity": {"workspace_fingerprint": agent.workspace.fingerprint()},
+                "runtime_identity": {"workspace_fingerprint": runtime.workspace.fingerprint()},
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -1371,9 +1371,9 @@ def test_resume_invalidates_stale_file_summaries_and_marks_partial_stale(tmp_pat
 
 
 def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(tmp_path):
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    result = agent.run_tool(
+    result = runtime.run_tool(
         "run_shell",
         {
             "command": "printf 'changed\\n' > README.md && exit 1",
@@ -1382,14 +1382,14 @@ def test_run_shell_nonzero_with_workspace_change_is_recorded_as_partial_success(
     )
 
     assert "exit_code: 1" in result
-    assert agent._last_tool_result_metadata["tool_status"] == "partial_success"
-    assert agent._last_tool_result_metadata["affected_paths"] == ["README.md"]
-    assert agent._last_tool_result_metadata["workspace_changed"] is True
+    assert runtime._last_tool_result_metadata["tool_status"] == "partial_success"
+    assert runtime._last_tool_result_metadata["affected_paths"] == ["README.md"]
+    assert runtime._last_tool_result_metadata["workspace_changed"] is True
 
 
 def test_resume_ignores_workspace_fingerprint_when_checkpoint_runtime_identity_is_stale(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_workspace",
         "items": {
             "ckpt_workspace": {
@@ -1409,13 +1409,13 @@ def test_resume_ignores_workspace_fingerprint_when_checkpoint_runtime_identity_i
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -1424,7 +1424,7 @@ def test_resume_ignores_workspace_fingerprint_when_checkpoint_runtime_identity_i
 
 
 def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"write_file","args":{"path":"notes.txt","content":"hello\\n"}}</tool>',
@@ -1432,11 +1432,11 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
         ],
     )
 
-    assert agent.ask("Create notes.txt") == "Done."
+    assert runtime.ask("Create notes.txt") == "Done."
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in runtime.run_store.trace_path(runtime.current_task_state).read_text(encoding="utf-8").splitlines()
     ]
     tool_event = [event for event in trace_events if event["event"] == "tool_executed"][-1]
 
@@ -1450,8 +1450,8 @@ def test_write_file_trace_records_minimum_tool_contract_fields(tmp_path):
 
 
 def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_schema",
         "items": {
             "ckpt_schema": {
@@ -1467,17 +1467,17 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
                 "key_files": [],
                 "freshness": {},
                 "summary": "schema changed",
-                "runtime_identity": {"workspace_fingerprint": agent.workspace.fingerprint()},
+                "runtime_identity": {"workspace_fingerprint": runtime.workspace.fingerprint()},
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -1486,15 +1486,15 @@ def test_resume_marks_schema_mismatch_when_checkpoint_version_is_incompatible(tm
 
 
 def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.session.pop("checkpoints", None)
-    agent.session_store.save(agent.session)
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.session.pop("checkpoints", None)
+    runtime.session_store.save(runtime.session)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="auto",
     )
 
@@ -1506,10 +1506,10 @@ def test_resume_marks_no_checkpoint_when_session_has_no_checkpoint_state(tmp_pat
 def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path):
     file_path = tmp_path / "runtime.py"
     file_path.write_text("alpha\n", encoding="utf-8")
-    agent = build_agent(tmp_path, ["<final>Resumed.</final>"])
-    agent.memory.set_file_summary("runtime.py", "runtime.py: alpha")
-    freshness = agent.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>Resumed.</final>"])
+    runtime.memory.set_file_summary("runtime.py", "runtime.py: alpha")
+    freshness = runtime.memory.to_dict()["file_summaries"]["runtime.py"]["freshness"]
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_freshness",
         "items": {
             "ckpt_freshness": {
@@ -1525,18 +1525,18 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
                 "key_files": [{"path": "runtime.py", "freshness": freshness}],
                 "freshness": {"runtime.py": freshness},
                 "summary": "runtime.py changed",
-                "runtime_identity": {"workspace_fingerprint": agent.workspace.fingerprint()},
+                "runtime_identity": {"workspace_fingerprint": runtime.workspace.fingerprint()},
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
     file_path.write_text("beta\n", encoding="utf-8")
 
-    assert agent.ask("Continue the task") == "Resumed."
+    assert runtime.ask("Continue the task") == "Resumed."
 
     trace_events = [
         json.loads(line)
-        for line in agent.run_store.trace_path(agent.current_task_state).read_text(encoding="utf-8").splitlines()
+        for line in runtime.run_store.trace_path(runtime.current_task_state).read_text(encoding="utf-8").splitlines()
     ]
     checkpoint_events = [event for event in trace_events if event["event"] == "checkpoint_created"]
 
@@ -1547,7 +1547,7 @@ def test_freshness_mismatch_creates_checkpoint_before_model_completion(tmp_path)
 def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
-    agent = Nano(
+    runtime = AgentRuntime(
         model_client=FakeModelClient(["<final>Done.</final>"]),
         workspace=workspace,
         session_store=store,
@@ -1557,9 +1557,9 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
         feature_flags={"memory": True, "relevant_memory": False},
     )
 
-    runtime_identity = agent.session["runtime_identity"]
+    runtime_identity = runtime.session["runtime_identity"]
 
-    assert runtime_identity["session_id"] == agent.session["id"]
+    assert runtime_identity["session_id"] == runtime.session["id"]
     assert runtime_identity["cwd"] == str(tmp_path)
     assert runtime_identity["approval_policy"] == "never"
     assert runtime_identity["read_only"] is False
@@ -1567,12 +1567,12 @@ def test_runtime_identity_persists_key_execution_metadata(tmp_path):
     assert runtime_identity["max_new_tokens"] == 1024
     assert runtime_identity["feature_flags"]["memory"] is True
     assert runtime_identity["feature_flags"]["relevant_memory"] is False
-    assert runtime_identity["shell_env_allowlist"] == list(agent.shell_env_allowlist)
+    assert runtime_identity["shell_env_allowlist"] == list(runtime.shell_env_allowlist)
 
 
 def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(tmp_path):
-    agent = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
-    agent.session["checkpoints"] = {
+    runtime = build_agent(tmp_path, ["<final>checkpoint ready.</final>"])
+    runtime.session["checkpoints"] = {
         "current_id": "ckpt_identity",
         "items": {
             "ckpt_identity": {
@@ -1589,7 +1589,7 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
                 "freshness": {},
                 "summary": "identity changed",
                 "runtime_identity": {
-                    "workspace_fingerprint": agent.workspace.fingerprint(),
+                    "workspace_fingerprint": runtime.workspace.fingerprint(),
                     "approval_policy": "auto",
                     "read_only": False,
                     "max_steps": 6,
@@ -1598,19 +1598,19 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
                     "model_client": "FakeModelClient",
                     "feature_flags": {"memory": True, "relevant_memory": True},
                     "shell_env_allowlist": ["PATH"],
-                    "session_id": agent.session["id"],
+                    "session_id": runtime.session["id"],
                     "cwd": str(tmp_path),
                 },
             }
         },
     }
-    agent.session_store.save(agent.session)
+    runtime.session_store.save(runtime.session)
 
-    resumed = Nano.from_session(
+    resumed = AgentRuntime.from_session(
         model_client=FakeModelClient(["<final>Resumed.</final>"]),
         workspace=build_workspace(tmp_path),
-        session_store=agent.session_store,
-        session_id=agent.session["id"],
+        session_store=runtime.session_store,
+        session_id=runtime.session["id"],
         approval_policy="never",
         max_steps=9,
         max_new_tokens=1024,
@@ -1646,9 +1646,9 @@ def test_resume_records_runtime_identity_mismatch_fields_in_metadata_and_trace(t
 
 
 def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    agent.run_tool(
+    runtime.run_tool(
         "run_shell",
         {
             "command": "printf 'changed\\n' > README.md && exit 1",
@@ -1658,7 +1658,7 @@ def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
 
     process_notes = [
         note
-        for note in agent.memory.to_dict()["episodic_notes"]
+        for note in runtime.memory.to_dict()["episodic_notes"]
         if note.get("kind") == "process"
     ]
 
@@ -1669,12 +1669,12 @@ def test_partial_success_creates_process_note_for_exploration_history(tmp_path):
 
 
 def test_writing_a_memory_file_rebuilds_its_project_index(tmp_path):
-    agent = build_agent(tmp_path, [])
-    assert agent.memory.memory_dir is not None
-    memory_path = agent.memory.memory_dir / "feedback_concise-output.md"
+    runtime = build_agent(tmp_path, [])
+    assert runtime.memory.memory_dir is not None
+    memory_path = runtime.memory.memory_dir / "feedback_concise-output.md"
     relative_path = memory_path.relative_to(tmp_path).as_posix()
 
-    agent.run_tool(
+    runtime.run_tool(
         "write_file",
         {
             "path": relative_path,
@@ -1682,7 +1682,7 @@ def test_writing_a_memory_file_rebuilds_its_project_index(tmp_path):
         },
     )
 
-    index = (agent.memory.memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+    index = (runtime.memory.memory_dir / "MEMORY.md").read_text(encoding="utf-8")
     assert "**[Concise output](feedback_concise-output.md)** (feedback)" in index
 
 
@@ -1699,37 +1699,37 @@ def test_agent_records_model_cache_metadata_in_last_prompt_metadata(tmp_path):
 
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
-    agent = Nano(
+    runtime = AgentRuntime(
         model_client=CacheAwareFakeModelClient(["<final>Done.</final>"]),
         workspace=workspace,
         session_store=store,
         approval_policy="auto",
     )
 
-    assert agent.ask("Cache aware run") == "Done."
+    assert runtime.ask("Cache aware run") == "Done."
 
-    assert agent.last_prompt_metadata["prompt_cache_supported"] is True
-    assert agent.last_prompt_metadata["cached_tokens"] == 512
-    assert agent.last_prompt_metadata["cache_hit"] is True
-    assert agent.last_prompt_metadata["prefix_hash"]
-    assert agent.last_prompt_metadata["prompt_cache_key"] == f"session:{agent.session['id']}"
+    assert runtime.last_prompt_metadata["prompt_cache_supported"] is True
+    assert runtime.last_prompt_metadata["cached_tokens"] == 512
+    assert runtime.last_prompt_metadata["cache_hit"] is True
+    assert runtime.last_prompt_metadata["prefix_hash"]
+    assert runtime.last_prompt_metadata["prompt_cache_key"] == f"session:{runtime.session['id']}"
 
 
 def test_streaming_conversation_retains_messages_until_auto_compact(tmp_path):
-    agent = build_agent(tmp_path, ["<final>Done.</final>"])
+    runtime = build_agent(tmp_path, ["<final>Done.</final>"])
     old_text = "OLD-" + ("A" * 320)
     recent_text = "RECENT-" + ("B" * 320)
 
-    agent.record_conversation({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
-    agent.record_conversation({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
-    agent.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
-    agent.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
-    agent.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
-    agent.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
+    runtime.record_conversation({"role": "user", "content": old_text, "created_at": "2026-04-07T09:00:00+00:00"})
+    runtime.record_conversation({"role": "assistant", "content": old_text, "created_at": "2026-04-07T09:01:00+00:00"})
+    runtime.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:02:00+00:00"})
+    runtime.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:03:00+00:00"})
+    runtime.record_conversation({"role": "user", "content": recent_text, "created_at": "2026-04-07T09:04:00+00:00"})
+    runtime.record_conversation({"role": "assistant", "content": recent_text, "created_at": "2026-04-07T09:05:00+00:00"})
 
-    assert agent.ask("Check the transcript") == "Done."
+    assert runtime.ask("Check the transcript") == "Done."
 
-    prompt = agent.model_client.prompts[-1]
+    prompt = runtime.model_client.prompts[-1]
 
     assert recent_text in prompt
     assert old_text in prompt
@@ -1738,7 +1738,7 @@ def test_streaming_conversation_retains_messages_until_auto_compact(tmp_path):
 def test_public_api_exports_resolve_through_package_path():
     assert callable(build_welcome)
     assert FakeModelClient is not None
-    assert Nano is not None
+    assert AgentRuntime is not None
     assert SessionStore is not None
     assert WorkspaceContext is not None
     assert Path(nano_pkg.__file__).as_posix().endswith("/nano/__init__.py")

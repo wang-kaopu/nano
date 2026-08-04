@@ -305,4 +305,10 @@ uv run pytest tests -q
 uv run ruff check nano tests scripts
 ```
 
+默认测试会跳过执行 benchmark 和 ablation 的集成测试，保证日常反馈速度。需要验证完整评估链路时，显式运行：
+
+```bash
+uv run pytest -m integration
+```
+
 内部代码按职责边界拆分：`nano/runtime/` 管理请求执行与恢复，`nano/tools/` 管理工具与安全边界，`nano/storage/` 管理持久化，`nano/workspace/` 管理仓库快照，`nano/memory/` 管理工作记忆与长期记忆，`nano/evaluation/` 保留 benchmark 与 metrics，`nano/providers/` 管理模型 provider client。新代码应直接使用这些包路径。

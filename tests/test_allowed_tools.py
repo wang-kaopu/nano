@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
+from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext
 from nano.evaluation.evaluator import BenchmarkEvaluator, validate_benchmark
 
 
@@ -10,7 +10,7 @@ def build_agent(tmp_path, allowed_tools=None):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     workspace = WorkspaceContext.build(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
-    return Nano(
+    return AgentRuntime(
         model_client=FakeModelClient(["<final>Done.</final>"]),
         workspace=workspace,
         session_store=store,
@@ -20,13 +20,13 @@ def build_agent(tmp_path, allowed_tools=None):
 
 
 def test_allowed_tools_filter_prompt_and_reject_direct_execution(tmp_path):
-    agent = build_agent(tmp_path, allowed_tools=["read_file"])
+    runtime = build_agent(tmp_path, allowed_tools=["read_file"])
 
-    prompt = agent.prompt("Read the README")
+    prompt = runtime.prompt("Read the README")
 
-    assert set(agent.tools) == {"read_file"}
+    assert set(runtime.tools) == {"read_file"}
     assert "## Available tools" not in prompt
-    assert agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20}) == "error: tool 'run_shell' is not allowed in this run"
+    assert runtime.run_tool("run_shell", {"command": "echo hi", "timeout": 20}) == "error: tool 'run_shell' is not allowed in this run"
 
 
 def test_allowed_tools_reject_unknown_tool_at_construction(tmp_path):
@@ -59,6 +59,7 @@ def test_validate_benchmark_rejects_unknown_allowed_tool(tmp_path):
         validate_benchmark(benchmark, repo_root=tmp_path)
 
 
+@pytest.mark.integration
 def test_benchmark_evaluator_applies_allowed_tools_to_runtime_prompt(tmp_path):
     fixture = tmp_path / "bench_repo_readme"
     fixture.mkdir()

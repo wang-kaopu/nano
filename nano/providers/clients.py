@@ -301,7 +301,7 @@ class OpenAICompatibleModelClient:
           `self.last_completion_metadata`
 
         在 agent 链路里的位置：
-        它位于 `Nano.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
+        它位于 `AgentRuntime.ask()` 的模型调用阶段，是稳定前缀缓存复用链路真正
         落到 provider API 的地方。
         """
         self.last_completion_metadata = {}

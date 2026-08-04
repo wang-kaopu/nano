@@ -1,9 +1,10 @@
 """Agent 运行时核心逻辑。
 
-Nano 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
+AgentRuntime 就是包在模型外面的控制循环：负责组 prompt、解析模型输出、
 校验并执行工具、写 trace、更新工作记忆，以及在合适的时候停下来。
 """
 
+import asyncio
 import json
 import hashlib
 import os
@@ -14,21 +15,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import nano.runtime.checkpoint as checkpointlib
 import nano.tools.security as securitylib
 import nano.tools.tools as toolkit
 from nano.permissions import load_project_permissions
 from nano.memory import memory as memorylib
-from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS
-from nano.runtime.context_manager import ContextManager
 from nano.runtime.prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
+from nano.runtime.task_state import TaskState
 from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.security import REDACTED_VALUE
 from nano.tools.tool import Tool, ToolProgressData
 from nano.tools.tool_context import ToolContext
-from nano.tools.tool_executor import ToolExecutor
 from nano.types import ModelClient
 from nano.utils.text import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
@@ -42,10 +40,7 @@ DEFAULT_FEATURE_FLAGS = {
 MODEL_CONTEXT_WINDOW = 1_000_000
 CONTEXT_WINDOW_RESERVE = 20_000
 
-__all__ = ["Nano", "SessionStore"]
-
-
-class Nano:
+class AgentRuntime:
     def __init__(
         self,
         model_client: ModelClient,
@@ -64,6 +59,9 @@ class Nano:
         feature_flags: Mapping[str, bool] | None = None,
         allowed_tools: Iterable[str] | None = None,
     ) -> None:
+        from nano.runtime.context_manager import ContextManager
+        from nano.tools.tool_executor import ToolExecutor
+
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
@@ -105,9 +103,9 @@ class Nano:
         self.context_manager = ContextManager(self)
         self.resume_state = self.evaluate_resume_state()
         self.session_path = self.session_store.save(self.session)
-        self.current_task_state = None
-        self.current_run_dir = None
-        self._current_query_task = None
+        self.current_task_state: TaskState | None = None
+        self.current_run_dir: Path | None = None
+        self._current_query_task: asyncio.Task[Any] | None = None
         self._active_tool_tasks = set()
         self.last_input_token_count = int(self.session.get("last_input_token_count", 0))
         self.last_api_call_time = 0.0
@@ -128,7 +126,7 @@ class Nano:
         session_store: SessionStore,
         session_id: str,
         **kwargs: Any,
-    ) -> "Nano":
+    ) -> "AgentRuntime":
         return cls(
             model_client=model_client,
             workspace=workspace,
@@ -155,12 +153,18 @@ class Nano:
         self.session.setdefault("last_input_token_count", 0)
 
     def current_runtime_identity(self) -> dict[str, Any]:
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.current_runtime_identity(self)
 
     def checkpoint_state(self) -> dict[str, Any]:
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.checkpoint_state(self)
 
     def current_checkpoint(self) -> dict[str, Any] | None:
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.current_checkpoint(self)
 
     def invalidate_stale_memory(self) -> list[str]:
@@ -169,9 +173,13 @@ class Nano:
         return invalidated
 
     def evaluate_resume_state(self) -> dict[str, Any]:
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.evaluate_resume_state(self)
 
     def render_checkpoint_text(self) -> str:
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.render_checkpoint_text(self)
 
     @staticmethod
@@ -363,6 +371,8 @@ class Nano:
         return self.prefix_state.user_system_reminder
 
     def _build_prompt_and_metadata(self, user_message, include_prefix: bool = True, relevant_memories=None):
+        from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS
+
         refresh = self.refresh_prefix()
         self.resume_state = self.evaluate_resume_state()
         prompt, metadata = self.context_manager.build(
@@ -441,9 +451,13 @@ class Nano:
         return changed_paths, summaries
 
     def create_checkpoint(self, task_state, user_message, trigger):
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.create_checkpoint(self, task_state, user_message, trigger)
 
     def infer_next_step(self, task_state):
+        from nano.runtime import checkpoint as checkpointlib
+
         return checkpointlib.infer_next_step(task_state)
 
     def update_memory_after_tool(self, name, args, result):
@@ -624,7 +638,7 @@ class Nano:
 
     def spawn_delegate(self, args):
         task = str(args.get("task", "")).strip()
-        child = Nano(
+        child = AgentRuntime(
             model_client=self.model_client,
             workspace=self.workspace,
             session_store=self.session_store,
@@ -701,35 +715,35 @@ class Nano:
         # 1. <tool>...</tool> 里包 JSON，适合简短调用
         # 2. XML 风格属性/子标签，适合写文件这类多行内容
         if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
-            body = Nano.extract(raw, "tool")
+            body = AgentRuntime.extract(raw, "tool")
             try:
                 payload = json.loads(body)
             except Exception:
-                return "retry", Nano.retry_notice("model returned malformed tool JSON")
+                return "retry", AgentRuntime.retry_notice("model returned malformed tool JSON")
             if not isinstance(payload, dict):
-                return "retry", Nano.retry_notice("tool payload must be a JSON object")
+                return "retry", AgentRuntime.retry_notice("tool payload must be a JSON object")
             if not str(payload.get("name", "")).strip():
-                return "retry", Nano.retry_notice("tool payload is missing a tool name")
+                return "retry", AgentRuntime.retry_notice("tool payload is missing a tool name")
             args = payload.get("args", {})
             if args is None:
                 payload["args"] = {}
             elif not isinstance(args, dict):
-                return "retry", Nano.retry_notice()
+                return "retry", AgentRuntime.retry_notice()
             return "tool", payload
         if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
-            payload = Nano.parse_xml_tool(raw)
+            payload = AgentRuntime.parse_xml_tool(raw)
             if payload is not None:
                 return "tool", payload
-            return "retry", Nano.retry_notice()
+            return "retry", AgentRuntime.retry_notice()
         if "<final>" in raw:
-            final = Nano.extract(raw, "final").strip()
+            final = AgentRuntime.extract(raw, "final").strip()
             if final:
                 return "final", final
-            return "retry", Nano.retry_notice("model returned an empty <final> answer")
+            return "retry", AgentRuntime.retry_notice("model returned an empty <final> answer")
         raw = raw.strip()
         if raw:
             return "final", raw
-        return "retry", Nano.retry_notice("model returned an empty response")
+        return "retry", AgentRuntime.retry_notice("model returned an empty response")
 
     @staticmethod
     def retry_notice(problem=None):
@@ -748,7 +762,7 @@ class Nano:
         match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
         if not match:
             return None
-        attrs = Nano.parse_attrs(match.group("attrs"))
+        attrs = AgentRuntime.parse_attrs(match.group("attrs"))
         name = str(attrs.pop("name", "")).strip()
         if not name:
             return None
@@ -757,7 +771,7 @@ class Nano:
         args = dict(attrs)
         for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
             if f"<{key}>" in body:
-                args[key] = Nano.extract_raw(body, key)
+                args[key] = AgentRuntime.extract_raw(body, key)
 
         body_text = body.strip("\n")
         if name == "write_file" and "content" not in args and body_text:

@@ -1,4 +1,4 @@
-from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
+from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext
 from nano.cli import _resolve_user_skill_command
 from nano.skills import build_skill_descriptions, discover_skills, execute_skill, get_skill_by_name, resolve_skill_prompt
 
@@ -14,7 +14,7 @@ def _write_skill(root, name, content):
 def _build_agent(root):
     """构建可直接执行 Skill 工具的测试 agent。"""
     (root / "README.md").write_text("demo\n", encoding="utf-8")
-    return Nano(
+    return AgentRuntime(
         model_client=FakeModelClient(["<final>Done.</final>"]),
         workspace=WorkspaceContext.build(root),
         session_store=SessionStore(root / ".nano" / "sessions"),
@@ -87,7 +87,7 @@ Inspect the code.
 
 
 def test_skill_tool_returns_expanded_instructions_and_prefix_refreshes(tmp_path):
-    agent = _build_agent(tmp_path)
+    runtime = _build_agent(tmp_path)
     _write_skill(
         tmp_path,
         "commit",
@@ -99,15 +99,15 @@ Commit request: $ARGUMENTS
 """,
     )
 
-    assert "# Available Skills" in agent.prompt("Commit the changes")
-    assert agent.run_tool("skill", {"skill_name": "commit", "args": "stage all"}) == (
+    assert "# Available Skills" in runtime.prompt("Commit the changes")
+    assert runtime.run_tool("skill", {"skill_name": "commit", "args": "stage all"}) == (
         '[Skill "commit" activated]\n\nCommit request: stage all'
     )
-    assert agent.run_tool("skill", {"skill_name": "missing"}) == "Unknown skill: missing"
+    assert runtime.run_tool("skill", {"skill_name": "missing"}) == "Unknown skill: missing"
 
 
 def test_user_skill_command_only_resolves_user_invocable_skills(tmp_path):
-    agent = _build_agent(tmp_path)
+    runtime = _build_agent(tmp_path)
     _write_skill(
         tmp_path,
         "commit",
@@ -130,6 +130,6 @@ Hidden request.
 """,
     )
 
-    assert _resolve_user_skill_command(agent, "/commit stage all") == ("commit", "Commit request: stage all")
-    assert _resolve_user_skill_command(agent, "/hidden") is None
+    assert _resolve_user_skill_command(runtime, "/commit stage all") == ("commit", "Commit request: stage all")
+    assert _resolve_user_skill_command(runtime, "/hidden") is None
     assert get_skill_by_name("missing", tmp_path) is None

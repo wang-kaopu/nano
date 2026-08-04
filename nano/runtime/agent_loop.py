@@ -2,9 +2,12 @@
 
 import asyncio
 import time
+from collections.abc import Callable
 
 from nano.runtime.checkpoint import CHECKPOINT_NONE_STATUS, CHECKPOINT_PARTIAL_STALE_STATUS, CHECKPOINT_WORKSPACE_MISMATCH_STATUS
+from nano.runtime.query_events import QueryEvent
 from nano.runtime.query_loop import QueryLoop
+from nano.runtime.runtime import AgentRuntime
 from nano.runtime.task_state import TaskState
 from nano.utils.text import clip, now
 
@@ -12,20 +15,20 @@ from nano.utils.text import clip, now
 class QueryEngine:
     """管理请求级异步查询循环之外的运行生命周期。"""
 
-    def __init__(self, runtime):
+    def __init__(self, runtime: AgentRuntime) -> None:
         """绑定持有会话和运行工件的运行时。"""
         self.runtime = runtime
 
-    def run(self, user_message, event_callback=None):
+    def run(self, user_message: str, event_callback: Callable[[QueryEvent], None] | None = None) -> str:
         """供未持有事件循环的同步调用方执行一条查询，并可接收运行事件。"""
         try:
             # 检查当前线程是否已运行 asyncio 事件循环。没有事件循环时会抛出 RuntimeError。
             asyncio.get_running_loop()
         except RuntimeError:
             return asyncio.run(self.run_async(user_message, event_callback=event_callback))
-        raise RuntimeError("Nano.ask() cannot run inside an event loop; await Nano.ask_async() instead")
+        raise RuntimeError("AgentRuntime.ask() cannot run inside an event loop; await AgentRuntime.ask_async() instead")
 
-    async def run_async(self, user_message, event_callback=None):
+    async def run_async(self, user_message: str, event_callback: Callable[[QueryEvent], None] | None = None) -> str:
         """执行一条用户请求、持久化运行工件，并可接收运行事件。"""
         runtime = self.runtime
         run_started_at = time.monotonic()
@@ -118,7 +121,7 @@ class QueryEngine:
 
         raise RuntimeError("QueryLoop ended without a final event")
 
-    def _finish_success(self, task_state, user_message, final, run_started_at):
+    def _finish_success(self, task_state: TaskState, user_message: str, final: str, run_started_at: float) -> str:
         """持久化正常完成工件并返回最终答案。"""
         runtime = self.runtime
         task_state.finish_success(final)
@@ -138,7 +141,7 @@ class QueryEngine:
         runtime.run_store.write_report(task_state, runtime.redact_artifact(runtime.build_report(task_state)))
         return final
 
-    def _finish_stopped(self, task_state, user_message, final, run_started_at):
+    def _finish_stopped(self, task_state: TaskState, user_message: str, final: str, run_started_at: float) -> str:
         """持久化停止或失败工件并返回可见的最终消息。"""
         runtime = self.runtime
         runtime.run_store.write_task_state(task_state)

@@ -6,13 +6,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Any
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from nano.memory import memory as memorylib
 from nano.providers.clients import FakeModelClient
-from nano.runtime.runtime import Nano
+from nano.runtime.runtime import AgentRuntime
 from nano.runtime.task_state import STOP_REASON_FINAL_ANSWER_RETURNED
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
@@ -304,7 +305,7 @@ def _checkpoint_payload(
     }
 
 
-def _apply_task_setup(agent, task, fixture_copy_root):
+def _apply_task_setup(runtime: AgentRuntime, task: dict[str, Any], fixture_copy_root: Path) -> None:
     setup = dict(task.get("setup", {}) or {})
     if not setup:
         return
@@ -312,7 +313,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
     kind = str(setup.get("kind", "")).strip()
     if kind == "context_reduction":
         conversation_count = int(setup.get("conversation_count", 4))
-        conversation = agent.session.setdefault("conversation", [])
+        conversation = runtime.session.setdefault("conversation", [])
         for index in range(conversation_count):
             conversation.append(
                 {
@@ -321,37 +322,37 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                     "created_at": f"2026-04-15T09:{index:02d}:00+00:00",
                 }
             )
-        agent.last_input_token_count = agent.effective_window
-        agent.session["last_input_token_count"] = agent.last_input_token_count
+        runtime.last_input_token_count = runtime.effective_window
+        runtime.session["last_input_token_count"] = runtime.last_input_token_count
         return
 
     if kind == "freshness_mismatch":
         path = str(setup.get("path", "sample.txt"))
         summary_text = str(setup.get("summary", f"{path}: stale benchmark summary"))
-        agent.memory.set_file_summary(path, summary_text)
-        agent.memory.remember_file(path)
-        freshness = agent.memory.to_dict()["file_summaries"][path]["freshness"]
-        agent.session["memory"] = agent.memory.to_dict()
-        agent.session["checkpoints"] = {
+        runtime.memory.set_file_summary(path, summary_text)
+        runtime.memory.remember_file(path)
+        freshness = runtime.memory.to_dict()["file_summaries"][path]["freshness"]
+        runtime.session["memory"] = runtime.memory.to_dict()
+        runtime.session["checkpoints"] = {
             "current_id": "ckpt_freshness",
             "items": {
                 "ckpt_freshness": _checkpoint_payload(
                     "ckpt_freshness",
                     current_goal="Re-anchor stale benchmark file state",
                     next_step=f"Re-read {path}",
-                    runtime_identity={"workspace_fingerprint": agent.workspace.fingerprint()},
+                    runtime_identity={"workspace_fingerprint": runtime.workspace.fingerprint()},
                     key_files=[{"path": path, "freshness": freshness}],
                     freshness={path: freshness},
                     summary="stale benchmark checkpoint",
                 )
             },
         }
-        agent.session_store.save(agent.session)
+        runtime.session_store.save(runtime.session)
         (fixture_copy_root / path).write_text(str(setup.get("mutated_text", "alpha\nbeta\nstale-updated\nplaceholder\n")), encoding="utf-8")
         return
 
     if kind == "workspace_fingerprint_ignored":
-        agent.session["checkpoints"] = {
+        runtime.session["checkpoints"] = {
             "current_id": "ckpt_workspace",
             "items": {
                 "ckpt_workspace": _checkpoint_payload(
@@ -363,7 +364,7 @@ def _apply_task_setup(agent, task, fixture_copy_root):
                 )
             },
         }
-        agent.session_store.save(agent.session)
+        runtime.session_store.save(runtime.session)
         return
 
 
@@ -453,7 +454,7 @@ class BenchmarkEvaluator:
             model_client = self.model_client_factory(task=task, workspace=workspace)
         else:
             model_client = FakeModelClient(_scripted_outputs_for_task(task))
-        agent = Nano(
+        runtime = AgentRuntime(
             model_client=model_client,
             workspace=workspace,
             session_store=session_store,
@@ -463,23 +464,23 @@ class BenchmarkEvaluator:
             max_new_tokens=self.max_new_tokens,
             allowed_tools=task["allowed_tools"],
         )
-        _apply_task_setup(agent, task, fixture_copy_root)
+        _apply_task_setup(runtime, task, fixture_copy_root)
 
-        initial_history_empty = len(agent.session["history"]) == 0
-        initial_memory_state = agent.memory.to_dict()
+        initial_history_empty = len(runtime.session["history"]) == 0
+        initial_memory_state = runtime.memory.to_dict()
         initial_memory_empty = memorylib.is_effectively_empty(initial_memory_state)
         initial_task_summary_empty = not str(initial_memory_state["working"]["task_summary"]).strip()
         initial_episodic_notes_empty = not initial_memory_state["episodic_notes"]
 
-        final_answer = agent.ask(task["prompt"])
-        task_state = agent.current_task_state
-        run_dir = agent.current_run_dir
+        final_answer = runtime.ask(task["prompt"])
+        task_state = runtime.current_task_state
+        run_dir = runtime.current_run_dir
         if task_state is None or run_dir is None:
             raise RuntimeError("benchmark task completed without run artifacts")
         run_dir = Path(run_dir)
-        task_state_path = agent.run_store.task_state_path(task_state)
-        report_path = agent.run_store.report_path(task_state)
-        report = agent.run_store.load_report(task_state.run_id)
+        task_state_path = runtime.run_store.task_state_path(task_state)
+        report_path = runtime.run_store.report_path(task_state)
+        report = runtime.run_store.load_report(task_state.run_id)
 
         artifact_path = _artifact_path_for_task(task)
         artifact_file = fixture_copy_root / artifact_path

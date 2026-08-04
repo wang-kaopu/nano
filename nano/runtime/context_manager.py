@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from nano.runtime.runtime import AgentRuntime
+
 
 SECTION_ORDER = ("prefix", "memory", "relevant_memory", "history", "current_request")
 CURRENT_REQUEST_SECTION = "current_request"
@@ -17,20 +19,20 @@ RELEVANT_MEMORY_LIMIT = 5
 class ContextManager:
     """组装不按 section 裁剪的模型输入。"""
 
-    def __init__(self, agent: Any) -> None:
+    def __init__(self, runtime: AgentRuntime) -> None:
         """绑定提供 prefix、memory 和会话状态的运行时。"""
-        self.agent = agent
+        self.runtime = runtime
 
     def build(self, user_message: str, include_prefix: bool = True, relevant_memories: list[Any] | None = None) -> tuple[str, dict[str, Any]]:
         """组装一轮完整 prompt，并记录各 section 的原始长度。"""
         user_message = str(user_message)
-        memory_enabled = self.agent.feature_enabled("memory")
-        relevant_memory_enabled = self.agent.feature_enabled("relevant_memory")
-        prefix = self.agent.prefix if include_prefix else ""
-        checkpoint_text = self.agent.render_checkpoint_text().strip()
+        memory_enabled = self.runtime.feature_enabled("memory")
+        relevant_memory_enabled = self.runtime.feature_enabled("relevant_memory")
+        prefix = self.runtime.prefix if include_prefix else ""
+        checkpoint_text = self.runtime.render_checkpoint_text().strip()
         if checkpoint_text and include_prefix:
             prefix = prefix + "\n\n" + checkpoint_text
-        memory = "Memory:\n- disabled" if not memory_enabled else str(self.agent.memory_text())
+        memory = "Memory:\n- disabled" if not memory_enabled else str(self.runtime.memory_text())
         selected_memories = relevant_memories or []
         relevant_memory = (
             "\n\n".join(["Relevant memories:", *[f"<system-reminder>\n{memory.header}\n\n{memory.content}\n</system-reminder>" for memory in selected_memories]])
@@ -40,7 +42,7 @@ class ContextManager:
         history = self._raw_history_text(self._model_history())
         current_request = f"Current user request:\n{user_message}"
         if not include_prefix:
-            reminder = self.agent.anthropic_user_system_reminder()
+            reminder = self.runtime.anthropic_user_system_reminder()
             if reminder:
                 current_request = f"<system-reminder>\n{reminder}\n</system-reminder>\n\n{current_request}"
         sections = {
@@ -55,7 +57,7 @@ class ContextManager:
 
     def _model_history(self) -> list[dict[str, Any]]:
         """优先返回流式循环维护的短对话窗口。"""
-        session = self.agent.session
+        session = self.runtime.session
         conversation = session.get("conversation")
         if isinstance(conversation, list) and conversation:
             return list(conversation)

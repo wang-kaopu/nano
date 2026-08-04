@@ -1,6 +1,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from nano.evaluation.metrics import (
     _provider_profile,
     run_context_ablation_v2,
@@ -10,6 +12,7 @@ from nano.evaluation.metrics import (
 )
 
 
+@pytest.mark.integration
 def test_run_context_ablation_v2_writes_expected_artifact(tmp_path):
     artifact_path = tmp_path / "artifacts" / "context-ablation-v2.json"
 
@@ -67,6 +70,7 @@ def test_provider_profile_uses_right_codes_shared_key_for_gpt(tmp_path, monkeypa
     assert profile["model"] == "gpt-5.4"
 
 
+@pytest.mark.integration
 def test_run_memory_ablation_v2_writes_expected_artifact(tmp_path):
     artifact_path = tmp_path / "artifacts" / "memory-ablation-v2.json"
 
@@ -82,6 +86,7 @@ def test_run_memory_ablation_v2_writes_expected_artifact(tmp_path):
     assert "memory_hit_rate" in artifact["variants"]["memory_on"]
 
 
+@pytest.mark.integration
 def test_run_recovery_ablation_v2_writes_expected_artifact(tmp_path):
     artifact_path = tmp_path / "artifacts" / "recovery-ablation-v2.json"
 
@@ -102,6 +107,7 @@ def test_run_recovery_ablation_v2_writes_expected_artifact(tmp_path):
     }
 
 
+@pytest.mark.integration
 def test_write_benchmark_core_report_marks_resume_safe_metrics(tmp_path):
     run_context_ablation_v2(tmp_path / "artifacts" / "context-ablation-v2.json", repetitions=1)
     run_memory_ablation_v2(tmp_path / "artifacts" / "memory-ablation-v2.json", repetitions=1)

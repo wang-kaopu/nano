@@ -3,7 +3,7 @@ import shlex
 import sys
 from unittest.mock import patch
 
-from nano import FakeModelClient, Nano, SessionStore, WorkspaceContext
+from nano import FakeModelClient, AgentRuntime, SessionStore, WorkspaceContext
 from nano import cli as nano_cli
 from nano.runtime.task_state import TaskState
 
@@ -17,7 +17,7 @@ def build_agent(tmp_path, outputs, **kwargs):
     workspace = build_workspace(tmp_path)
     store = SessionStore(tmp_path / ".nano" / "sessions")
     approval_policy = kwargs.pop("approval_policy", "auto")
-    return Nano(
+    return AgentRuntime(
         model_client=FakeModelClient(outputs),
         workspace=workspace,
         session_store=store,
@@ -28,9 +28,9 @@ def build_agent(tmp_path, outputs, **kwargs):
 
 def test_workspace_escape_is_rejected(tmp_path):
     (tmp_path / "outside.txt").write_text("outside\n", encoding="utf-8")
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    result = agent.run_tool("read_file", {"path": "../outside.txt"})
+    result = runtime.run_tool("read_file", {"path": "../outside.txt"})
 
     assert "path escapes workspace" in result
 
@@ -39,9 +39,9 @@ def test_symlink_path_traversal_is_rejected(tmp_path):
     outside = tmp_path.parent / f"{tmp_path.name}-outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (tmp_path / "linked.txt").symlink_to(outside)
-    agent = build_agent(tmp_path, [])
+    runtime = build_agent(tmp_path, [])
 
-    result = agent.run_tool("read_file", {"path": "linked.txt"})
+    result = runtime.run_tool("read_file", {"path": "linked.txt"})
 
     assert "path escapes workspace" in result
 
@@ -51,9 +51,9 @@ def test_safe_shell_command_does_not_require_approval(tmp_path):
         '{"permissions":{"tools":{"allow":[],"deny":[]},"shell":{"allow":["echo*"],"deny":[]}}}',
         encoding="utf-8",
     )
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    runtime = build_agent(tmp_path, [], approval_policy="never")
 
-    result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+    result = runtime.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
     assert "exit_code: 0" in result
 
@@ -64,18 +64,18 @@ def test_project_allowed_write_file_does_not_require_approval(tmp_path):
         '{"permissions":{"tools":{"allow":["write_file"],"deny":[]},"shell":{"allow":[],"deny":[]}}}',
         encoding="utf-8",
     )
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    runtime = build_agent(tmp_path, [], approval_policy="never")
 
-    result = agent.run_tool("write_file", {"path": "created.txt", "content": "created\n"})
+    result = runtime.run_tool("write_file", {"path": "created.txt", "content": "created\n"})
 
     assert result == "wrote created.txt (8 chars)"
     assert (tmp_path / "created.txt").read_text(encoding="utf-8") == "created\n"
 
 
 def test_dangerous_shell_command_requires_approval(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="never")
+    runtime = build_agent(tmp_path, [], approval_policy="never")
 
-    result = agent.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
+    result = runtime.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
 
     assert result == "error: approval denied for run_shell"
 
@@ -86,18 +86,18 @@ def test_project_deny_rule_blocks_shell_command_even_when_approval_is_automatic(
         '{"permissions":{"tools":{"allow":[],"deny":[]},"shell":{"allow":["*"],"deny":["git rm*"]}}}',
         encoding="utf-8",
     )
-    agent = build_agent(tmp_path, [], approval_policy="auto")
+    runtime = build_agent(tmp_path, [], approval_policy="auto")
 
-    result = agent.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
+    result = runtime.run_tool("run_shell", {"command": "git rm -f README.md", "timeout": 20})
 
     assert "permission denied by permissions.json" in result
     assert (tmp_path / "README.md").exists()
 
 
 def test_read_only_agent_cannot_run_safe_shell_command(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="auto", read_only=True)
+    runtime = build_agent(tmp_path, [], approval_policy="auto", read_only=True)
 
-    result = agent.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
+    result = runtime.run_tool("run_shell", {"command": "echo hi", "timeout": 20})
 
     assert result == "error: approval denied for run_shell"
 
@@ -112,15 +112,15 @@ def test_double_ctrl_c_handler_requires_two_presses(capsys):
             return True
 
     times = iter([10.0, 11.5])
-    agent = InterruptibleAgent()
-    handler = nano_cli._DoubleCtrlCInterruptHandler(agent, clock=lambda: next(times))
+    runtime = InterruptibleAgent()
+    handler = nano_cli._DoubleCtrlCInterruptHandler(runtime, clock=lambda: next(times))
 
     handler(None, None)
-    assert agent.interrupts == 0
+    assert runtime.interrupts == 0
     assert "Press Ctrl-C again" in capsys.readouterr().out
 
     handler(None, None)
-    assert agent.interrupts == 1
+    assert runtime.interrupts == 1
     assert "Interrupting current request" in capsys.readouterr().out
 
 
@@ -154,8 +154,8 @@ def test_cli_build_agent_wires_secret_env_names_from_parser(tmp_path):
                 "GH_PAT",
             ]
         )
-        agent = nano_cli.build_agent(args)
-        assert set(agent.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
+        runtime = nano_cli.build_agent(args)
+        assert set(runtime.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
 
 
 def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
@@ -170,8 +170,8 @@ def test_cli_build_agent_uses_default_configured_secret_names(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     with patch.dict(os.environ, {"GH_PAT": "ghp-default-1"}, clear=True):
         args = nano_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
-        agent = nano_cli.build_agent(args)
-        assert agent.secret_env_summary()["secret_env_names"] == ["GH_PAT"]
+        runtime = nano_cli.build_agent(args)
+        assert runtime.secret_env_summary()["secret_env_names"] == ["GH_PAT"]
 
 
 def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_path):
@@ -194,8 +194,8 @@ def test_cli_build_agent_loads_project_env_secrets_before_redaction_setup(tmp_pa
     (tmp_path / ".env").write_text("NANO_DEEPSEEK_API_KEY=sk-project-secret\n", encoding="utf-8")
     with patch.dict(os.environ, {}, clear=True), patch("nano.cli.AnthropicCompatibleModelClient", DummyModelClient):
         args = nano_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--provider", "deepseek"])
-        agent = nano_cli.build_agent(args)
-        assert agent.secret_env_summary()["secret_env_names"] == ["NANO_DEEPSEEK_API_KEY"]
+        runtime = nano_cli.build_agent(args)
+        assert runtime.secret_env_summary()["secret_env_names"] == ["NANO_DEEPSEEK_API_KEY"]
 
 
 def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
@@ -217,25 +217,25 @@ def test_cli_build_agent_reads_secret_names_from_environment_config(tmp_path):
         clear=True,
     ):
         args = nano_cli.build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
-        agent = nano_cli.build_agent(args)
-        assert agent.secret_env_summary()["secret_env_names"] == ["NANO_CUSTOM_SECRET"]
+        runtime = nano_cli.build_agent(args)
+        assert runtime.secret_env_summary()["secret_env_names"] == ["NANO_CUSTOM_SECRET"]
 
 
 def test_run_shell_uses_allowlisted_environment_only(tmp_path):
     secret = "shh-allowlist-secret"
-    agent = build_agent(tmp_path, [], approval_policy="auto")
+    runtime = build_agent(tmp_path, [], approval_policy="auto")
     script = 'import os; print(os.getenv("NANO_ALLOWLIST_SECRET", "missing"))'
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
 
     with patch.dict(os.environ, {"NANO_ALLOWLIST_SECRET": secret}, clear=False):
-        result = agent.run_tool("run_shell", {"command": command, "timeout": 20})
+        result = runtime.run_tool("run_shell", {"command": command, "timeout": 20})
 
     assert secret not in result
     assert "missing" in result
 
 
 def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
-    agent = build_agent(tmp_path, [], approval_policy="auto")
+    runtime = build_agent(tmp_path, [], approval_policy="auto")
 
     with patch("nano.tools.tools.subprocess.run") as fake_run:
         fake_run.return_value = type(
@@ -243,24 +243,24 @@ def test_bound_tool_methods_delegate_into_tools_module(tmp_path):
             (),
             {"returncode": 0, "stdout": "toolkit-shell\n", "stderr": ""},
         )()
-        shell_result = agent.tool_run_shell({"command": "echo bypass", "timeout": 20})
+        shell_result = runtime.tool_run_shell({"command": "echo bypass", "timeout": 20})
 
     assert "toolkit-shell" in shell_result
     fake_run.assert_called_once()
-    assert agent.tool_run_shell.__func__.__module__ == "nano.runtime.runtime"
+    assert runtime.tool_run_shell.__func__.__module__ == "nano.runtime.runtime"
 
     with patch("nano.tools.tools.tool_delegate", return_value="toolkit-delegate") as fake_delegate:
-        delegate_result = agent.tool_delegate({"task": "inspect README.md", "max_steps": 2})
+        delegate_result = runtime.tool_delegate({"task": "inspect README.md", "max_steps": 2})
 
     assert delegate_result == "toolkit-delegate"
     fake_delegate.assert_called_once()
 
 
 def test_delegate_depth_limit_is_enforced(tmp_path):
-    agent = build_agent(tmp_path, [], depth=1, max_depth=1)
+    runtime = build_agent(tmp_path, [], depth=1, max_depth=1)
 
     try:
-        agent.validate_tool("delegate", {"task": "inspect README.md", "max_steps": 2})
+        runtime.validate_tool("delegate", {"task": "inspect README.md", "max_steps": 2})
     except ValueError as exc:
         assert "delegate depth exceeded" in str(exc)
     else:
@@ -269,7 +269,7 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
 
 def test_delegate_child_is_read_only(tmp_path):
     target = tmp_path / "child-was-not-allowed.txt"
-    agent = build_agent(
+    runtime = build_agent(
         tmp_path,
         [
             '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
@@ -278,11 +278,11 @@ def test_delegate_child_is_read_only(tmp_path):
         ],
     )
 
-    result = agent.ask("Delegate the work")
+    result = runtime.ask("Delegate the work")
 
     assert result == "parent done"
     assert not target.exists()
-    tool_events = [item for item in agent.session["history"] if item["role"] == "tool"]
+    tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
     assert tool_events[0]["name"] == "delegate"
     assert "delegate_result" in tool_events[0]["content"]
 
@@ -291,15 +291,15 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
     github_pat = "ghp_configured_secret_123"
     gh_pat = "ghp_configured_secret_456"
     with patch.dict(os.environ, {"GITHUB_PAT": github_pat, "GH_PAT": gh_pat}, clear=True):
-        agent = build_agent(
+        runtime = build_agent(
             tmp_path,
             [],
             secret_env_names=("GITHUB_PAT", "GH_PAT"),
         )
         state = TaskState.create(run_id="run_001", task_id="task_001", user_request="Mask configured secrets")
-        agent.run_store.start_run(state)
+        runtime.run_store.start_run(state)
 
-        assert set(agent.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
+        assert set(runtime.secret_env_summary()["secret_env_names"]) == {"GITHUB_PAT", "GH_PAT"}
 
         payload = {
             "GITHUB_PAT": github_pat,
@@ -307,13 +307,13 @@ def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):
             "nested": {"GITHUB_PAT": github_pat, "GH_PAT": gh_pat},
             "list": [github_pat, gh_pat],
         }
-        agent.emit_trace(state, "tool_executed", payload)
-        agent.run_store.write_report(
+        runtime.emit_trace(state, "tool_executed", payload)
+        runtime.run_store.write_report(
             state,
-            agent.redact_artifact({"task_state": state.to_dict(), "payload": payload}),
+            runtime.redact_artifact({"task_state": state.to_dict(), "payload": payload}),
         )
 
-    run_dir = agent.run_store.run_dir(state.run_id)
+    run_dir = runtime.run_store.run_dir(state.run_id)
     trace_text = (run_dir / "trace.jsonl").read_text(encoding="utf-8")
     report_text = (run_dir / "report.json").read_text(encoding="utf-8")
 

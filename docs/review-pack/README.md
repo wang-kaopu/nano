@@ -7,7 +7,7 @@ Nano is a lightweight local coding agent harness for repository-grounded enginee
 ## Architecture map
 
 - `nano.cli` wires configuration, provider clients, workspace context, and the runtime.
-- `nano.runtime.runtime.Nano` coordinates the agent control surface.
+- `nano.runtime.runtime.AgentRuntime` coordinates the agent control surface.
 - `nano.runtime.context_manager` builds bounded model context from prefix, memory, history, and the current request.
 - `nano.tools.tools` defines the explicit tool allowlist used by the runtime.
 - `nano.storage.run_store` writes per-run artifacts for review and replay.

@@ -1,11 +1,11 @@
 from pathlib import Path
 
 import nano
-from nano import PermissionResult, Nano, SessionStore, Tool, ToolProgressData, ToolResult, WorkspaceContext, build_agent, build_arg_parser, build_welcome, main
+from nano import PermissionResult, AgentRuntime, SessionStore, Tool, ToolProgressData, ToolResult, WorkspaceContext, build_agent, build_arg_parser, build_welcome, main
 
 
 def test_public_api_exports_current_names_only():
-    assert Nano is not None
+    assert AgentRuntime is not None
     assert Tool is not None
     assert ToolResult is not None
     assert ToolProgressData is not None
@@ -24,9 +24,9 @@ def test_build_agent_returns_nano(tmp_path):
     (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
     args = build_arg_parser().parse_args(["--cwd", str(tmp_path), "--approval", "auto"])
 
-    agent = build_agent(args)
+    runtime = build_agent(args)
 
-    assert isinstance(agent, Nano)
+    assert isinstance(runtime, AgentRuntime)
 
 
 def test_lightweight_package_split_uses_package_paths_without_legacy_shims():

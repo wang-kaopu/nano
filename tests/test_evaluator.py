@@ -52,6 +52,7 @@ def test_load_benchmark_rejects_missing_required_task_fields(tmp_path):
         load_benchmark(benchmark_path)
 
 
+@pytest.mark.integration
 def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp_path):
     artifact_path = tmp_path / "benchmark-v1.json"
     evaluator = BenchmarkEvaluator(
@@ -79,6 +80,7 @@ def test_run_fixed_benchmark_uses_fresh_fixture_copy_and_fresh_run_directory(tmp
     assert "beta-locked" in (copied_fixture / "sample.txt").read_text(encoding="utf-8")
 
 
+@pytest.mark.integration
 def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
     artifact_path = tmp_path / "benchmark-v1.json"
     artifact = run_fixed_benchmark(
@@ -121,6 +123,7 @@ def test_run_fixed_benchmark_reports_metadata_and_success_definition(tmp_path):
         assert row["stop_reason"] == "final_answer_returned"
 
 
+@pytest.mark.integration
 def test_run_fixed_benchmark_covers_recovery_rows(tmp_path):
     artifact = run_fixed_benchmark(
         benchmark_path=Path("benchmarks/coding_tasks.json"),
@@ -136,6 +139,7 @@ def test_run_fixed_benchmark_covers_recovery_rows(tmp_path):
     assert session["conversation"][0]["content"].startswith("[Previous conversation summary]")
 
 
+@pytest.mark.integration
 def test_run_harness_regression_v2_writes_named_artifact(tmp_path):
     artifact_path = tmp_path / "artifacts" / "harness-regression-v2.json"
 
@@ -152,6 +156,7 @@ def test_run_harness_regression_v2_writes_named_artifact(tmp_path):
     assert artifact["summary"]["verifier_pass_rate"] == 1.0
 
 
+@pytest.mark.integration
 def test_run_task_anchors_paths_to_fixture_copy_even_inside_repo_workspace():
     evaluator = BenchmarkEvaluator(
         benchmark_path=Path("benchmarks/coding_tasks.json"),
