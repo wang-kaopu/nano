@@ -42,12 +42,13 @@ class TaskState(BaseModel):
     user_request: str
     status: TaskStatus = STATUS_RUNNING
     tool_steps: int = Field(default=0, ge=0)
-    initial_max_steps: int = Field(default=0, ge=0)
-    resolved_max_steps: int = Field(default=0, ge=0)
+    initial_max_steps: int | None = Field(default=None, ge=0)
+    resolved_max_steps: int | None = Field(default=None, ge=0)
     auto_extensions: int = Field(default=0, ge=0)
     duplicate_read_calls: int = Field(default=0, ge=0)
     last_tool_made_progress: bool = False
     invalid_tool_calls: int = Field(default=0, ge=0)
+    protocol_retries: int = Field(default=0, ge=0)
     attempts: int = Field(default=0, ge=0)
     last_tool: str = ""
     stop_reason: str = ""
@@ -92,6 +93,11 @@ class TaskState(BaseModel):
         """记录一次被护栏拒绝的工具调用，不消耗正常工作步骤预算。"""
         self.invalid_tool_calls += 1
         self.last_tool = str(name or "")
+        return self
+
+    def record_protocol_retry(self) -> "TaskState":
+        """记录一次因模型响应格式无效而进行的协议重试。"""
+        self.protocol_retries += 1
         return self
 
     def stop(self, stop_reason: str, status: TaskStatus = STATUS_STOPPED, final_answer: str = "") -> "TaskState":

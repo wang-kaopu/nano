@@ -100,6 +100,18 @@ def test_query_engine_stops_after_three_invalid_tool_calls(tmp_path):
     assert runtime.current_task_state.stop_reason == "invalid_tool_call_limit_reached"
 
 
+def test_query_engine_stops_after_configured_protocol_retries(tmp_path):
+    runtime = build_agent(tmp_path, ["", "", "", "", "<final>Too late.</final>"])
+
+    answer = asyncio.run(QueryEngine(runtime).run_async("Read README.md"))
+
+    assert answer == "Stopped after too many malformed model responses without a valid tool call or final answer."
+    assert runtime.current_task_state is not None
+    assert runtime.current_task_state.protocol_retries == 3
+    assert runtime.current_task_state.attempts == 4
+    assert runtime.current_task_state.stop_reason == "retry_limit_reached"
+
+
 def test_delegate_returns_completed_child_result(tmp_path):
     runtime = build_agent(
         tmp_path,

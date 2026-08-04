@@ -14,7 +14,7 @@ class Nano:
         run_store,
         approval_policy="auto",
         max_steps=4,
-        max_new_tokens=512,
+        max_new_tokens=4096,
     ):
         self.model_client = model_client
         self.workspace = workspace

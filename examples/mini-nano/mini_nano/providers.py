@@ -13,7 +13,7 @@ class FakeModelClient:
         self.prompts = []
         self.last_completion_metadata = {}
 
-    def complete(self, prompt, max_new_tokens=512, **_kwargs):
+    def complete(self, prompt, max_new_tokens=4096, **_kwargs):
         self.prompts.append(prompt)
         self.last_completion_metadata = {"model": "FakeModelClient", "max_new_tokens": max_new_tokens}
         if self.outputs is not None:

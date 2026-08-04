@@ -21,6 +21,7 @@ from typing import Any, Iterable, Mapping
 
 import nano.tools.security as securitylib
 import nano.tools.tools as toolkit
+from nano.config import RuntimeLimits, runtime_limits_from_env
 from nano.permissions import load_project_permissions
 from nano.memory import memory as memorylib
 from nano.runtime.prompt_prefix import PromptPrefix, build_prompt_prefix, tool_signature
@@ -29,7 +30,7 @@ from nano.skills import build_skill_descriptions
 from nano.storage.run_store import RunStore
 from nano.storage.session_store import SessionStore
 from nano.tools.tool import Tool, ToolProgressData
-from nano.tools.tool_context import MAX_EXPLORER_LIST_FILES_CALLS, FileReadCoverage, RequiredTargetState, ToolContext
+from nano.tools.tool_context import FileReadCoverage, RequiredTargetState, ToolContext
 from nano.types import ModelClient
 from nano.utils.text import clip, now
 from nano.workspace.context import IGNORED_PATH_NAMES, MAX_HISTORY, WorkspaceContext
@@ -46,11 +47,6 @@ EXPLORER_TOOLS = ("list_files", "read_file", "search", "skill")
 WORKER_TOOLS = ("list_files", "read_file", "search", "write_file", "patch_file")
 READ_FILE_PAGE_LINES = 200
 READ_FILE_PAGE_BYTES = 24_000
-MAX_INITIAL_EXPLORER_STEPS = 8
-MAX_INITIAL_WORKER_STEPS = 10
-MIN_EXPLORER_STEPS = 2
-
-
 @dataclass
 class AsyncAgentTask:
     """描述父 agent 注册的一条后台委派任务。"""
@@ -67,8 +63,8 @@ class AsyncAgentTask:
     error: str = ""
     stop_reason: str = ""
     requested_max_steps: int | None = None
-    minimum_max_steps: int = 0
-    resolved_max_steps: int = 0
+    minimum_max_steps: int | None = None
+    resolved_max_steps: int | None = None
     used_tool_steps: int = 0
     auto_extensions: int = 0
     explorer_list_files_calls: int = 0
@@ -83,8 +79,8 @@ class ResolvedDelegateBudget:
     """保存父任务建议值与运行时计算出的子任务工具预算。"""
 
     requested_max_steps: int | None
-    minimum_max_steps: int
-    resolved_max_steps: int
+    minimum_max_steps: int | None
+    resolved_max_steps: int | None
     estimated_reads: int
     reason: dict[str, Any]
 
@@ -122,13 +118,13 @@ class AgentRuntime:
         session: dict[str, Any] | None = None,
         run_store: RunStore | None = None,
         approval_policy: str = "ask",
-        max_steps: int = 12,
-        max_new_tokens: int = 512,
-        max_final_tokens: int = 2048,
-        max_final_retries: int = 1,
+        max_steps: int | None = None,
+        max_new_tokens: int | None = None,
+        max_final_tokens: int | None = None,
+        max_final_retries: int | None = None,
         agent_type: str = "root",
         depth: int = 0,
-        max_depth: int = 1,
+        max_depth: int | None = None,
         read_only: bool = False,
         shell_env_allowlist: Iterable[str] | None = None,
         secret_env_names: Iterable[str] | None = None,
@@ -139,6 +135,7 @@ class AgentRuntime:
         max_turns: int | None = None,
         agent_instructions: str = "",
         workspace_mutation_lock: asyncio.Lock | None = None,
+        limits: RuntimeLimits | None = None,
     ) -> None:
         from nano.runtime.context_manager import ContextManager
         from nano.tools.tool_executor import ToolExecutor
@@ -147,6 +144,7 @@ class AgentRuntime:
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self.permissions = load_project_permissions(self.root)
+        self.limits = limits or runtime_limits_from_env()
         self.read_file_state: dict[str, int] = {}
         self.read_coverage_state: dict[str, FileReadCoverage] = {}
         self.read_cursors = {}
@@ -157,26 +155,25 @@ class AgentRuntime:
         self.explorer_list_files_calls = 0
         self.session_store = session_store
         self.approval_policy = approval_policy
-        self.max_steps = max_steps
-        # 未显式配置 turn 上限时，保留既有的“允许若干次格式重试”行为。
-        default_max_turns = max(max_steps * 3, max_steps + 4)
-        if self.agent_type == "explorer":
-            default_max_turns = max(default_max_turns, max_steps + MAX_EXPLORER_LIST_FILES_CALLS + 1)
-        self.max_turns = default_max_turns if max_turns is None else int(max_turns)
-        if self.max_steps < 1:
+        self.max_steps = self.limits.max_steps if max_steps is None else int(max_steps)
+        if max_turns is not None:
+            self.max_turns = int(max_turns)
+        else:
+            self.max_turns = self.limits.max_turns
+        if self.max_steps is not None and self.max_steps < 1:
             raise ValueError("max_steps must be at least 1")
-        if self.max_turns < 1:
+        if self.max_turns is not None and self.max_turns < 1:
             raise ValueError("max_turns must be at least 1")
-        self.max_new_tokens = max_new_tokens
-        self.max_final_tokens = max_final_tokens
-        self.max_final_retries = max_final_retries
+        self.max_new_tokens = self.limits.max_new_tokens if max_new_tokens is None else int(max_new_tokens)
+        self.max_final_tokens = self.limits.max_final_tokens if max_final_tokens is None else int(max_final_tokens)
+        self.max_final_retries = self.limits.max_final_retries if max_final_retries is None else int(max_final_retries)
         if self.max_final_tokens < 1:
             raise ValueError("max_final_tokens must be at least 1")
         if self.max_final_retries < 0:
             raise ValueError("max_final_retries must not be negative")
         self.effective_window = MODEL_CONTEXT_WINDOW - CONTEXT_WINDOW_RESERVE
         self.depth = depth
-        self.max_depth = max_depth
+        self.max_depth = self.limits.max_agent_depth if max_depth is None else int(max_depth)
         self.read_only = read_only
         self.shell_env_allowlist = tuple(shell_env_allowlist or DEFAULT_SHELL_ENV_ALLOWLIST)
         self.secret_env_names = {str(name).upper() for name in (secret_env_names or ())}
@@ -910,17 +907,21 @@ class AgentRuntime:
                 else:
                     targets.append(ResolvedTarget(path=relative_path, exists=False, kind="missing", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=1))
             estimated_reads = sum(target.estimated_reads for target in targets)
-            minimum = min(max(MIN_EXPLORER_STEPS, estimated_reads), MAX_INITIAL_EXPLORER_STEPS)
+            minimum = min(max(self.limits.min_explorer_steps, estimated_reads), self.limits.max_initial_explorer_steps)
         elif spec.type == "worker":
             targets = [ResolvedTarget(path=str(target).strip(), exists=self.path(str(target).strip()).exists(), kind="unknown", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=0) for target in spec.targets]
             estimated_reads = 0
-            minimum = min(6, MAX_INITIAL_WORKER_STEPS)
+            minimum = min(self.limits.initial_worker_steps, self.limits.max_initial_worker_steps)
         else:
             targets = [ResolvedTarget(path=str(target).strip(), exists=self.path(str(target).strip()).exists(), kind="unknown", total_lines=None, size_bytes=None, file_mtime_ns=None, estimated_reads=0) for target in spec.targets]
             estimated_reads = 0
-            minimum = 3
+            minimum = self.limits.initial_default_steps
         requested = spec.requested_max_steps
-        resolved = max(requested or 0, minimum)
+        if self.max_steps is None:
+            minimum = None
+            resolved = None
+        else:
+            resolved = max(requested or 0, minimum)
         return ResolvedDelegateSpec(
             task=spec.task,
             agent_type=spec.type,
@@ -942,6 +943,7 @@ class AgentRuntime:
             "max_new_tokens": self.max_new_tokens,
             "max_final_tokens": self.max_final_tokens,
             "max_final_retries": self.max_final_retries,
+            "limits": self.limits,
             "agent_type": agent_type,
             "depth": self.depth + 1,
             "max_depth": self.max_depth,
@@ -1078,7 +1080,7 @@ class AgentRuntime:
     def serialize_async_agent_result(self, async_agent_task_id: str) -> dict[str, Any]:
         """将一个已经结束的子任务序列化为 delegate 的稳定结果格式。"""
         task = self._async_agent_tasks[async_agent_task_id]
-        return {"asyncAgentTaskId": task.async_agent_task_id, "type": task.agent_type, "task": task.task_prompt, "targets": list(task.targets), "scope": task.scope, "worktreePath": task.worktree_path, "status": task.status, "stopReason": task.stop_reason, "answer": task.answer, "error": task.error, "evidenceComplete": task.evidence_complete, "missingTargets": list(task.missing_targets), "finalizationErrorCode": task.finalization_error_code, "completionMode": task.completion_mode, "requestedMaxSteps": task.requested_max_steps, "minimumMaxSteps": task.minimum_max_steps, "resolvedMaxSteps": task.resolved_max_steps, "usedToolSteps": task.used_tool_steps, "autoExtensions": task.auto_extensions, "explorerListFilesCalls": task.explorer_list_files_calls, "explorerListFilesLimit": MAX_EXPLORER_LIST_FILES_CALLS if task.agent_type == "explorer" else 0}
+        return {"asyncAgentTaskId": task.async_agent_task_id, "type": task.agent_type, "task": task.task_prompt, "targets": list(task.targets), "scope": task.scope, "worktreePath": task.worktree_path, "status": task.status, "stopReason": task.stop_reason, "answer": task.answer, "error": task.error, "evidenceComplete": task.evidence_complete, "missingTargets": list(task.missing_targets), "finalizationErrorCode": task.finalization_error_code, "completionMode": task.completion_mode, "requestedMaxSteps": task.requested_max_steps, "minimumMaxSteps": task.minimum_max_steps, "resolvedMaxSteps": task.resolved_max_steps, "usedToolSteps": task.used_tool_steps, "autoExtensions": task.auto_extensions, "explorerListFilesCalls": task.explorer_list_files_calls, "explorerListFilesLimit": self.limits.explorer_list_files_limit if task.agent_type == "explorer" else 0}
 
     async def run_delegates(self, raw_specs: list[Mapping[str, Any]]) -> str:
         """并发创建全部子 agent，并等待全部任务进入终态。"""

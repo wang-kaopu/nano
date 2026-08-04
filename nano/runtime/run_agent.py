@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, TypeAlias
 
+from nano.config import RuntimeLimits
 from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import QueryEvent
 from nano.runtime.runtime import AgentRuntime, ResolvedTarget
@@ -31,19 +32,20 @@ class AgentDefinition:
     session: dict[str, Any] | None = None
     run_store: RunStore | None = None
     approval_policy: str = "ask"
-    max_steps: int = 12
-    max_new_tokens: int = 512
-    max_final_tokens: int = 2048
-    max_final_retries: int = 1
+    max_steps: int | None = None
+    max_new_tokens: int | None = None
+    max_final_tokens: int | None = None
+    max_final_retries: int | None = None
     agent_type: str = "root"
     depth: int = 0
-    max_depth: int = 1
+    max_depth: int | None = None
     read_only: bool = False
     shell_env_allowlist: Iterable[str] | None = None
     secret_env_names: Iterable[str] | None = None
     feature_flags: Mapping[str, bool] | None = None
     workspace_mutation_lock: asyncio.Lock | None = None
     required_targets: tuple[ResolvedTarget, ...] = ()
+    limits: RuntimeLimits | None = None
 
 
 def _normalize_prompt_messages(prompt_messages: PromptMessage | Iterable[PromptMessage]) -> str:
@@ -100,6 +102,7 @@ def build_runtime(
         max_turns=max_turns,
         agent_instructions=agent_definition.instructions,
         workspace_mutation_lock=agent_definition.workspace_mutation_lock,
+        limits=agent_definition.limits,
     )
     runtime.register_required_targets(agent_definition.required_targets)
     return runtime

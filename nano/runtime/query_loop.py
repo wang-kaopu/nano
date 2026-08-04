@@ -15,9 +15,6 @@ from nano.utils.text import clip, now
 
 
 MICROCOMPACT_IDLE_S = 5 * 60
-MAX_INVALID_TOOL_CALLS = 3
-
-
 @dataclass(frozen=True)
 class FinalizationResult:
     """描述无工具最终请求的答案有效性和结束状态。"""
@@ -42,15 +39,14 @@ class QueryLoop:
         self.user_message = str(user_message)
         self.memory_prefetch = memory_prefetch
         self.injected_memories = []
-        self.max_attempts = max(runtime.max_steps * 3, runtime.max_steps + 4)
 
     def _should_auto_extend(self) -> bool:
         """判断已接近完成的子 agent 是否可获得唯一一次预算扩容。"""
-        if self.runtime.depth == 0 or self.task_state.auto_extensions >= 1:
+        if self.runtime.depth == 0 or self.task_state.auto_extensions >= self.runtime.limits.max_auto_extensions:
             return False
-        if not self.task_state.last_tool_made_progress or self.task_state.duplicate_read_calls >= 2:
+        if not self.task_state.last_tool_made_progress or self.task_state.duplicate_read_calls >= self.runtime.limits.duplicate_read_limit:
             return False
-        if self.runtime.max_steps >= 10 or not self.runtime.remaining_file_ranges():
+        if self.runtime.max_steps is None or self.runtime.max_steps >= self.runtime.limits.auto_extension_max_steps or not self.runtime.remaining_file_ranges():
             return False
         if self.runtime.required_targets:
             return True
@@ -58,7 +54,9 @@ class QueryLoop:
 
     def _apply_auto_extension(self) -> int:
         """为满足条件的子 agent 增加至多两次工具调用额度。"""
-        extra_steps = min(2, 10 - self.runtime.max_steps)
+        if self.runtime.max_steps is None:
+            return 0
+        extra_steps = min(self.runtime.limits.auto_extension_steps, self.runtime.limits.auto_extension_max_steps - self.runtime.max_steps)
         if extra_steps <= 0:
             return 0
         self.runtime.max_steps += extra_steps
@@ -279,7 +277,10 @@ class QueryLoop:
                 for tool in self.runtime.tools.values()
             ]
         native_input = native_input_seed if native_input_seed is not None else []
-        while self.task_state.tool_steps < self.runtime.max_steps and self.task_state.attempts < self.max_attempts and self.task_state.attempts < self.runtime.max_turns:
+        while (
+            (self.runtime.max_steps is None or self.task_state.tool_steps < self.runtime.max_steps)
+            and (self.runtime.max_turns is None or self.task_state.attempts < self.runtime.max_turns)
+        ):
             try:
                 auto_compacted = await self._auto_compact(native_tool_call_protocol)
             except RuntimeError as exc:
@@ -479,7 +480,7 @@ class QueryLoop:
                     if tool_result.metadata.get("tool_error_code") == "approval_denied":
                         yield QueryEvent("stopped", {"reason": "approval_denied"})
                         return
-                if self.task_state.invalid_tool_calls >= MAX_INVALID_TOOL_CALLS:
+                if self.task_state.invalid_tool_calls >= self.runtime.limits.max_invalid_tool_calls:
                     yield QueryEvent("stopped", {"reason": "invalid_tool_call_limit_reached"})
                     return
                 if anthropic_tool_results:
@@ -496,6 +497,10 @@ class QueryLoop:
             else:
                 kind, payload = self.runtime.parse(raw)
                 if kind == "retry":
+                    if self.task_state.protocol_retries >= self.runtime.limits.max_protocol_retries:
+                        yield QueryEvent("stopped", {"reason": "retry_limit_reached"})
+                        return
+                    self.task_state.record_protocol_retry()
                     self.runtime.record({"role": "assistant", "content": payload, "created_at": now()})
                     self.runtime.record_conversation({"role": "assistant", "content": payload, "created_at": now()})
                     yield QueryEvent("retry", {"message": payload})
@@ -532,7 +537,7 @@ class QueryLoop:
             yield QueryEvent("final", {"answer": final, "completion_mode": "normal_final", "provider_finish_reason": provider_finish_reason, "termination_reason": termination_reason})
             return
 
-        if self.task_state.tool_steps >= self.runtime.max_steps:
+        if self.runtime.max_steps is not None and self.task_state.tool_steps >= self.runtime.max_steps:
             if self._should_auto_extend():
                 extension = self._apply_auto_extension()
                 if extension:
@@ -552,9 +557,7 @@ class QueryLoop:
                 return
             reason = "output_limit_reached" if finalization.truncated else "step_limit_reached" if not evidence_complete else "forced_final_invalid"
             yield QueryEvent("stopped", {"reason": reason, "answer": finalization.answer, "evidence_complete": evidence_complete, "missing_targets": missing_targets, "finalization_error_code": finalization.error_code, "provider_finish_reason": finalization.provider_finish_reason, "termination_reason": finalization.finish_reason})
-        elif self.task_state.attempts >= self.runtime.max_turns:
+        elif self.runtime.max_turns is not None and self.task_state.attempts >= self.runtime.max_turns:
             yield QueryEvent("stopped", {"reason": "turn_limit_reached"})
-        elif self.task_state.attempts >= self.max_attempts and self.task_state.tool_steps < self.runtime.max_steps:
-            yield QueryEvent("stopped", {"reason": "retry_limit_reached"})
         else:
             yield QueryEvent("stopped", {"reason": "step_limit_reached"})

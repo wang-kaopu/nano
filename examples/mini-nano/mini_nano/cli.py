@@ -12,7 +12,7 @@ def build_arg_parser():
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
     parser.add_argument("--approval", choices=("auto", "never"), default="auto", help="Whether risky tools are allowed.")
     parser.add_argument("--max-steps", type=int, default=4, help="Maximum tool/model iterations.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
+    parser.add_argument("--max-new-tokens", type=int, default=4096, help="Maximum model output tokens per step.")
     return parser
 
 

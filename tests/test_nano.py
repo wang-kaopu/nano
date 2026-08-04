@@ -980,7 +980,96 @@ def test_build_arg_parser_defaults_provider_to_deepseek(tmp_path):
     args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     assert args.provider == "deepseek"
-    assert args.max_steps == 12
+    assert not hasattr(args, "max_steps")
+    assert not hasattr(args, "max_new_tokens")
+
+
+def test_build_agent_reads_turn_and_step_limits_from_project_env(tmp_path):
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "NANO_DEEPSEEK_API_KEY=sk-project-deepseek",
+                "NANO_MAX_STEPS=7",
+                "NANO_MAX_NEW_TOKENS=8192",
+                "NANO_MAX_FINAL_TOKENS=3072",
+                "NANO_MAX_PROTOCOL_RETRIES=5",
+                "NANO_MAX_TURNS=19",
+                "NANO_MAX_FINAL_RETRIES=2",
+                "NANO_MAX_INVALID_TOOL_CALLS=4",
+                "NANO_MAX_AUTO_EXTENSIONS=2",
+                "NANO_AUTO_EXTENSION_STEPS=3",
+                "NANO_AUTO_EXTENSION_MAX_STEPS=13",
+                "NANO_DUPLICATE_READ_LIMIT=4",
+                "NANO_EXPLORER_LIST_FILES_LIMIT=6",
+                "NANO_MIN_EXPLORER_STEPS=3",
+                "NANO_MAX_INITIAL_EXPLORER_STEPS=9",
+                "NANO_INITIAL_WORKER_STEPS=7",
+                "NANO_MAX_INITIAL_WORKER_STEPS=11",
+                "NANO_INITIAL_DEFAULT_STEPS=4",
+                "NANO_MAX_AGENT_DEPTH=2",
+                "NANO_PROVIDER_MAX_RETRIES=5",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            fake_client = configure_mock_model_client(mock_anthropic.return_value)
+            runtime = nano_pkg.build_agent(args)
+
+    assert runtime.model_client is fake_client
+    assert runtime.max_steps == 7
+    assert runtime.max_new_tokens == 8192
+    assert runtime.max_final_tokens == 3072
+    assert runtime.max_turns == 19
+    assert runtime.max_final_retries == 2
+    assert runtime.max_depth == 2
+    assert runtime.limits.max_invalid_tool_calls == 4
+    assert runtime.limits.max_auto_extensions == 2
+    assert runtime.limits.auto_extension_steps == 3
+    assert runtime.limits.auto_extension_max_steps == 13
+    assert runtime.limits.duplicate_read_limit == 4
+    assert runtime.limits.explorer_list_files_limit == 6
+    assert runtime.limits.max_protocol_retries == 5
+    assert runtime.limits.provider_max_retries == 5
+    assert mock_anthropic.call_args.kwargs["max_retries"] == 5
+    assert runtime.resolve_delegate_spec({"task": "Inspect README.md", "type": "explorer", "targets": ["README.md"]}).budget.minimum_max_steps == 3
+    assert runtime.resolve_delegate_spec({"task": "Update source", "type": "worker", "scope": "."}).budget.minimum_max_steps == 7
+    assert runtime.resolve_delegate_spec({"task": "Review state", "type": "default"}).budget.minimum_max_steps == 4
+
+
+def test_blank_step_and_turn_limits_are_unlimited_for_child_agents(tmp_path):
+    (tmp_path / ".env").write_text("NANO_DEEPSEEK_API_KEY=sk-project-deepseek\nNANO_MAX_STEPS=\nNANO_MAX_TURNS=\n", encoding="utf-8")
+    args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
+
+    with patch.dict(os.environ, {}, clear=True):
+        with patch("nano.cli.AnthropicCompatibleModelClient") as mock_anthropic:
+            configure_mock_model_client(mock_anthropic.return_value)
+            runtime = nano_pkg.build_agent(args)
+
+    assert runtime.max_steps is None
+    assert runtime.max_turns is None
+    assert runtime.resolve_delegate_spec({"task": "Inspect README.md", "type": "explorer", "targets": ["README.md"]}).budget.minimum_max_steps is None
+    assert runtime.resolve_delegate_spec({"task": "Inspect README.md", "type": "explorer", "targets": ["README.md"]}).budget.resolved_max_steps is None
+
+
+def test_blank_step_and_turn_limits_allow_a_normal_tool_run(tmp_path):
+    with patch.dict(os.environ, {"NANO_MAX_STEPS": "", "NANO_MAX_TURNS": ""}, clear=True):
+        runtime = build_agent(
+            tmp_path,
+            [
+                '<tool>{"name":"read_file","args":{"path":"README.md"}}</tool>',
+                "<final>Completed without a step or turn limit.</final>",
+            ],
+        )
+
+    assert run_query(runtime, "Inspect README.md") == "Completed without a step or turn limit."
+    assert runtime.current_task_state is not None
+    assert runtime.current_task_state.initial_max_steps is None
+    assert runtime.current_task_state.resolved_max_steps is None
 
 
 def test_build_arg_parser_accepts_anthropic_provider(tmp_path):

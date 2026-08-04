@@ -8,7 +8,6 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.runtime.runtime import AgentRuntime
-from nano.tools.tool_context import MAX_EXPLORER_LIST_FILES_CALLS
 from nano.tools.tools import WorkspaceTool, tool_definition
 from nano.utils.text import clip
 
@@ -104,7 +103,7 @@ class ToolExecutor:
         """返回当前工具是否使用 explorer 的独立目录枚举配额。"""
         if name != "list_files" or self.runtime.agent_type != "explorer":
             return True, 0, 0
-        return False, self.runtime.explorer_list_files_calls, MAX_EXPLORER_LIST_FILES_CALLS
+        return False, self.runtime.explorer_list_files_calls, self.runtime.limits.explorer_list_files_limit
 
     def _render_read_file_result(self, content: str, max_result_size_chars: int) -> tuple[str, str]:
         """裁剪 read_file 正文时保留范围、游标和覆盖等分页元数据。"""
@@ -180,9 +179,9 @@ class ToolExecutor:
             )
 
         is_explorer_list_files = name == "list_files" and runtime.agent_type == "explorer"
-        if is_explorer_list_files and runtime.explorer_list_files_calls >= MAX_EXPLORER_LIST_FILES_CALLS:
+        if is_explorer_list_files and runtime.explorer_list_files_calls >= runtime.limits.explorer_list_files_limit:
             return ToolExecutionResult(
-                content=f"error: explorer list_files limit reached ({MAX_EXPLORER_LIST_FILES_CALLS})",
+                content=f"error: explorer list_files limit reached ({runtime.limits.explorer_list_files_limit})",
                 metadata=_metadata(
                     "rejected",
                     tool_error_code="explorer_list_files_limit_reached",
@@ -191,7 +190,7 @@ class ToolExecutor:
                     progress_made=False,
                     counts_as_tool_step=False,
                     explorer_list_files_calls=runtime.explorer_list_files_calls,
-                    explorer_list_files_limit=MAX_EXPLORER_LIST_FILES_CALLS,
+                    explorer_list_files_limit=runtime.limits.explorer_list_files_limit,
                 ),
             )
 

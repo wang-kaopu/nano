@@ -24,7 +24,7 @@ from prompt_toolkit.layout.containers import HSplit
 from prompt_toolkit.shortcuts import CompleteStyle, PromptSession
 from prompt_toolkit.widgets import Dialog, Label, RadioList
 
-from nano.config import load_project_env, provider_env
+from nano.config import load_project_env, provider_env, runtime_limits_from_env
 from nano.providers.clients import AnthropicCompatibleModelClient, OpenAICompatibleModelClient
 from nano.runtime.agent_loop import QueryEngine
 from nano.runtime.query_events import QueryEvent
@@ -264,7 +264,7 @@ def _configured_secret_names(args):
     return sorted(configured_secret_names)
 
 
-def _build_model_client(args):
+def _build_model_client(args, provider_max_retries: int | None = None):
     provider = args.provider
     # CLI 只负责把 provider 选择翻译成具体 client。
     # 真正的提示词格式、缓存支持、HTTP 协议差异，都封装在 models.py 里。
@@ -281,6 +281,7 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=args.openai_timeout,
+            max_retries=provider_max_retries,
         )
     if provider == "anthropic":
         model = _effective_model(args, provider)
@@ -295,6 +296,7 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=args.openai_timeout,
+            max_retries=provider_max_retries,
         )
     if provider == "deepseek":
         model = _effective_model(args, provider)
@@ -306,6 +308,7 @@ def _build_model_client(args):
             api_key=api_key,
             temperature=args.temperature,
             timeout=args.openai_timeout,
+            max_retries=provider_max_retries,
         )
 
     raise ValueError(f"Unsupported provider: {provider}")
@@ -377,8 +380,9 @@ def build_agent(args: argparse.Namespace) -> AgentRuntime:
     workspace = WorkspaceContext.build(args.cwd)
     load_project_env(workspace.repo_root)
     configured_secret_names = _configured_secret_names(args)
+    limits = runtime_limits_from_env()
     store = SessionStore(workspace.repo_root + "/.nano/sessions", secret_env_names=configured_secret_names)
-    model = _build_model_client(args)
+    model = _build_model_client(args, limits.provider_max_retries)
     session_id = args.resume
     if session_id == "latest":
         session_id = store.latest()
@@ -389,18 +393,16 @@ def build_agent(args: argparse.Namespace) -> AgentRuntime:
             session_store=store,
             session_id=session_id,
             approval_policy=args.approval,
-            max_steps=args.max_steps,
-            max_new_tokens=args.max_new_tokens,
             secret_env_names=configured_secret_names,
+            limits=limits,
         )
     return AgentRuntime(
         model_client=model,
         workspace=workspace,
         session_store=store,
         approval_policy=args.approval,
-        max_steps=args.max_steps,
-        max_new_tokens=args.max_new_tokens,
         secret_env_names=configured_secret_names,
+        limits=limits,
     )
 
 
@@ -428,8 +430,6 @@ def build_arg_parser():
         default=[],
         help="Extra environment variable names to treat as secrets for trace/report redaction.",
     )
-    parser.add_argument("--max-steps", type=int, default=12, help="Maximum successful tool/model iterations per request.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
     parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to the provider.")
     return parser
 
@@ -534,7 +534,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_store=runtime.run_store,
                 approval_policy=runtime.approval_policy,
                 max_steps=runtime.max_steps,
+                max_turns=runtime.max_turns,
                 max_new_tokens=runtime.max_new_tokens,
+                max_final_tokens=runtime.max_final_tokens,
+                max_final_retries=runtime.max_final_retries,
                 depth=runtime.depth,
                 max_depth=runtime.max_depth,
                 read_only=runtime.read_only,
@@ -542,6 +545,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 secret_env_names=runtime.secret_env_names,
                 feature_flags=runtime.feature_flags,
                 allowed_tools=runtime.allowed_tools,
+                limits=runtime.limits,
             )
             print(f"Resumed session {session_id}.")
             continue

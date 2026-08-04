@@ -15,12 +15,12 @@ from typing import Any, AsyncIterator, Iterable, Mapping
 
 import httpx
 
+from nano.config import runtime_limits_from_env
 from nano.runtime.query_events import ModelStreamEvent
 from nano.runtime.termination import normalize_termination_reason
 from nano.storage.schemas import AnthropicResponseModel, OpenAIResponseModel
 
 OPENAI_COMPATIBLE_USER_AGENT = "nano/0.1"
-MAX_RETRIES = 3
 
 
 def _completion_termination_metadata(provider_finish_reason: str) -> dict[str, str]:
@@ -124,7 +124,7 @@ def _request_with_retries(
     payload: dict[str, Any],
     headers: Mapping[str, str],
     timeout: float,
-    max_retries: int = MAX_RETRIES,
+    max_retries: int,
 ) -> httpx.Response:
     """发送 JSON POST 请求，并对可恢复错误执行带抖动的指数退避重试。"""
     last_error: Exception | None = None
@@ -289,12 +289,15 @@ def _with_anthropic_cache_breakpoints(messages: list[dict[str, Any]]) -> list[di
 class OpenAICompatibleModelClient:
     """通过 OpenAI-compatible Responses API 请求模型。"""
 
-    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float) -> None:
+    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float, max_retries: int | None = None) -> None:
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.max_retries = runtime_limits_from_env().provider_max_retries if max_retries is None else int(max_retries)
+        if self.max_retries < 0:
+            raise ValueError("max_retries must not be negative")
         # 当前只在明确支持 prompt cache 语义的后端上启用这条链路，
         # 避免对不支持的后端传一个“看起来统一、其实没意义”的伪参数。
         self.supports_prompt_cache = any(host in self.base_url for host in ("openai.com", "right.codes"))
@@ -370,6 +373,7 @@ class OpenAICompatibleModelClient:
                 payload,
                 headers,
                 self.timeout,
+                self.max_retries,
             )
         except httpx.RequestError as exc:
             raise RuntimeError(
@@ -450,7 +454,7 @@ class OpenAICompatibleModelClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             emitted_output = False
             saw_delta = False
             try:
@@ -458,7 +462,7 @@ class OpenAICompatibleModelClient:
                     async with client.stream("POST", self.base_url + "/responses", json=payload, headers=headers) as response:
                         if response.status_code >= 400:
                             error = _ProviderHTTPError(response.status_code)
-                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
+                            if await _wait_to_retry(error, attempt, self.max_retries):
                                 continue
                             yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
                             return
@@ -513,7 +517,7 @@ class OpenAICompatibleModelClient:
                                 return
                 return
             except (httpx.RequestError, json.JSONDecodeError) as exc:
-                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
+                if not emitted_output and await _wait_to_retry(exc, attempt, self.max_retries):
                     continue
                 yield ModelStreamEvent("error", metadata={"message": f"OpenAI-compatible stream failed: {exc}"})
                 return
@@ -531,12 +535,15 @@ def _extract_anthropic_text(data: dict[str, Any]) -> str:
 class AnthropicCompatibleModelClient:
     """通过 Anthropic-compatible Messages API 请求模型。"""
 
-    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float) -> None:
+    def __init__(self, model: str, base_url: str, api_key: str, temperature: float | None, timeout: float, max_retries: int | None = None) -> None:
         self.model = model
         self.base_url = _normalize_versioned_base_url(base_url)
         self.api_key = api_key
         self.temperature = temperature
         self.timeout = timeout
+        self.max_retries = runtime_limits_from_env().provider_max_retries if max_retries is None else int(max_retries)
+        if self.max_retries < 0:
+            raise ValueError("max_retries must not be negative")
         self.supports_prompt_cache = True
         self.supports_native_tool_calls = True
         self.native_tool_call_protocol = "anthropic"
@@ -581,6 +588,7 @@ class AnthropicCompatibleModelClient:
                 payload,
                 headers,
                 self.timeout,
+                self.max_retries,
             )
         except httpx.RequestError as exc:
             raise RuntimeError(
@@ -635,7 +643,7 @@ class AnthropicCompatibleModelClient:
             payload["tools"] = tools
             payload["tool_choice"] = {"type": "auto", "disable_parallel_tool_use": False}
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
-        for attempt in range(MAX_RETRIES + 1):
+        for attempt in range(self.max_retries + 1):
             content_blocks: dict[int, dict[str, Any]] = {}
             emitted_output = False
             try:
@@ -643,7 +651,7 @@ class AnthropicCompatibleModelClient:
                     async with client.stream("POST", self.base_url + "/messages", json=payload, headers=headers) as response:
                         if response.status_code >= 400:
                             error = _ProviderHTTPError(response.status_code)
-                            if await _wait_to_retry(error, attempt, MAX_RETRIES):
+                            if await _wait_to_retry(error, attempt, self.max_retries):
                                 continue
                             yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible request failed with HTTP {response.status_code}: {await response.aread()}"})
                             return
@@ -736,7 +744,7 @@ class AnthropicCompatibleModelClient:
                                 return
                 return
             except (httpx.RequestError, json.JSONDecodeError) as exc:
-                if not emitted_output and await _wait_to_retry(exc, attempt, MAX_RETRIES):
+                if not emitted_output and await _wait_to_retry(exc, attempt, self.max_retries):
                     continue
                 yield ModelStreamEvent("error", metadata={"message": f"Anthropic-compatible stream failed: {exc}"})
                 return

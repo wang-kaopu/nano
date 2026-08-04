@@ -7,9 +7,6 @@ from typing import Any, Callable, Mapping
 from nano.permissions import ProjectPermissions
 
 
-MAX_EXPLORER_LIST_FILES_CALLS = 5
-
-
 @dataclass
 class FileReadCoverage:
     """维护一个文件在当前 agent 会话中的已读取范围。"""
