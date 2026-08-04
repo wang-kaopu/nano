@@ -264,22 +264,25 @@ def test_agent_saves_and_resumes_session(tmp_path):
     assert run_query(resumed, "Continue") == "Resumed."
 
 
-def test_delegate_uses_child_agent(tmp_path):
+def test_delegate_returns_an_async_launch_and_notifies_parent_on_completion(tmp_path):
     runtime = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"inspect README","max_steps":2}}</tool>',
-            "<final>Child result.</final>",
-            "<final>Parent incorporated the child result.</final>",
-        ],
-    )
+                '<tool>{"name":"delegate","args":{"task":"inspect README","type":"explorer","max_steps":2}}</tool>',
+                "<final>Child result.</final>",
+                "<final>Parent incorporated the child result.</final>",
+                "<final>Wait for the child notification.</final>",
+                "<final>Parent incorporated the child result.</final>",
+            ],
+        )
 
     answer = run_query(runtime, "Use delegation")
 
     assert answer == "Parent incorporated the child result."
     tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
-    assert tool_events[0]["name"] == "delegate"
-    assert "delegate_result" in tool_events[0]["content"]
+    delegate_event = next(item for item in tool_events if item["name"] == "delegate")
+    assert json.loads(delegate_event["content"])["status"] == "async_launched"
+    assert any(item["name"] == "async_agent_notification" and "Child result." in item["content"] for item in tool_events)
 
 
 def test_patch_file_replaces_exact_match(tmp_path):
@@ -973,6 +976,7 @@ def test_build_arg_parser_defaults_provider_to_deepseek(tmp_path):
     args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     assert args.provider == "deepseek"
+    assert args.max_steps == 12
 
 
 def test_build_arg_parser_accepts_anthropic_provider(tmp_path):

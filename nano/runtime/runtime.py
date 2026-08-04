@@ -5,11 +5,15 @@ AgentRuntime 就是包在模型外面的控制循环：负责组 prompt、解析
 """
 
 import asyncio
+import copy
 import json
 import hashlib
 import os
 import re
+import subprocess
+import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -37,19 +41,24 @@ DEFAULT_FEATURE_FLAGS = {
 }
 MODEL_CONTEXT_WINDOW = 1_000_000
 CONTEXT_WINDOW_RESERVE = 20_000
+EXPLORER_TOOLS = ("list_files", "read_file", "search", "skill")
+WORKER_TOOLS = ("list_files", "read_file", "search", "write_file", "patch_file")
 
 
-class SubagentHandle:
-    """持有已启动子 agent 的运行时，并提供等待最终结论的入口。"""
+@dataclass
+class AsyncAgentTask:
+    """描述父 agent 注册的一条后台委派任务。"""
 
-    def __init__(self, runtime, task) -> None:
-        """绑定子 agent runtime 与其后台运行任务。"""
-        self.runtime = runtime
-        self.task = task
-
-    async def wait(self) -> str:
-        """等待子 agent 完成当前任务并返回最终结论。"""
-        return await self.task
+    async_agent_task_id: str
+    signature: str
+    agent_type: str
+    task_prompt: str
+    task: asyncio.Task[Any]
+    scope: str = ""
+    worktree_path: str = ""
+    status: str = "running"
+    answer: str = ""
+    error: str = ""
 
 
 class AgentRuntime:
@@ -61,7 +70,7 @@ class AgentRuntime:
         session: dict[str, Any] | None = None,
         run_store: RunStore | None = None,
         approval_policy: str = "ask",
-        max_steps: int = 6,
+        max_steps: int = 12,
         max_new_tokens: int = 512,
         depth: int = 0,
         max_depth: int = 1,
@@ -74,6 +83,7 @@ class AgentRuntime:
         use_exact_tools: bool = False,
         max_turns: int | None = None,
         agent_instructions: str = "",
+        workspace_mutation_lock: asyncio.Lock | None = None,
     ) -> None:
         from nano.runtime.context_manager import ContextManager
         from nano.tools.tool_executor import ToolExecutor
@@ -108,6 +118,7 @@ class AgentRuntime:
             raise ValueError("tool_use_context.root must match the runtime workspace root")
         self.use_exact_tools = bool(use_exact_tools)
         self.agent_instructions = str(agent_instructions).strip()
+        self.workspace_mutation_lock = workspace_mutation_lock or asyncio.Lock()
         self.run_store = run_store or RunStore(Path(workspace.repo_root) / ".nano" / "runs")
         self.session = session or {
             "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
@@ -134,6 +145,9 @@ class AgentRuntime:
         self.current_run_dir: Path | None = None
         self._current_query_task: asyncio.Task[Any] | None = None
         self._active_tool_tasks = set()
+        self._async_agent_tasks: dict[str, AsyncAgentTask] = {}
+        self._async_agent_task_ids_by_signature: dict[str, str] = {}
+        self.awaiting_async_agent_decision = False
         self.last_input_token_count = int(self.session.get("last_input_token_count", 0))
         self.last_api_call_time = 0.0
         self.last_prompt_metadata = {}
@@ -558,6 +572,7 @@ class AgentRuntime:
         task = self._current_query_task
         if task is None or task.done():
             return False
+        self.interrupt_async_agents()
         task.cancel()
         return True
 
@@ -656,49 +671,282 @@ class AgentRuntime:
             depth=self.depth,
             max_depth=self.max_depth,
             spawn_delegate=self.spawn_delegate,
+            interrupt_agents=self.interrupt_async_agents,
             read_file_state=self.read_file_state,
             permissions=self.permissions,
         )
 
-    async def _consume_subagent_stream(self, task: str) -> str:
-        """由子 agent 自行消费自身 QueryLoop 事件并返回终止答案。"""
-        from nano.runtime.agent_loop import QueryEngine
+    def register_async_agent(self, async_agent_task_id: str, task: AsyncAgentTask) -> None:
+        """将已创建的后台 agent 注册到当前父 agent 的任务表。"""
+        if async_agent_task_id in self._async_agent_tasks:
+            raise ValueError(f"async agent task '{async_agent_task_id}' is already registered")
+        self._async_agent_tasks[async_agent_task_id] = task
 
-        async for event in QueryEngine(self).stream_async(task):
-            if event.type in {"final", "error", "stopped"}:
-                return str(event.payload["answer"])
-        raise RuntimeError("subagent stream ended without a terminal event")
+    def complete_agent_task(self, async_agent_task_id: str, status: str, answer: str = "", error: str = "") -> AsyncAgentTask:
+        """记录后台 agent 的终态，供通知和后续查询使用。"""
+        task = self._async_agent_tasks.get(async_agent_task_id)
+        if task is None:
+            raise ValueError(f"async agent task '{async_agent_task_id}' is not registered")
+        task.status = status
+        task.answer = answer
+        task.error = error
+        return task
 
-    async def start_subagent(self, args) -> SubagentHandle:
-        """异步创建并启动只读子 agent，立即返回可等待的运行句柄。"""
-        task = str(args.get("task", "")).strip()
-        child = AgentRuntime(
-            model_client=self.model_client,
-            workspace=self.workspace,
-            session_store=self.session_store,
-            run_store=self.run_store,
-            approval_policy="never",
-            max_steps=int(args.get("max_steps", 3)),
-            max_new_tokens=self.max_new_tokens,
-            depth=self.depth + 1,
-            max_depth=self.max_depth,
-            read_only=True,
-            secret_env_names=self.secret_env_names,
-            shell_env_allowlist=self.shell_env_allowlist,
-            allowed_tools=self.allowed_tools if self.use_exact_tools else None,
-            use_exact_tools=self.use_exact_tools,
+    def enqueue_agent_notification(self, async_agent_task_id: str) -> None:
+        """将后台 agent 的完成结果写入父 agent 的下一轮可见上下文。"""
+        task = self._async_agent_tasks.get(async_agent_task_id)
+        if task is None:
+            raise ValueError(f"async agent task '{async_agent_task_id}' is not registered")
+        details = [f"Async agent task {async_agent_task_id} ({task.agent_type}) {task.status}."]
+        if task.worktree_path:
+            details.append(f"Worktree: {task.worktree_path}")
+        if task.scope:
+            details.append(f"Scope: {task.scope}")
+        if task.answer:
+            details.append(task.answer)
+        if task.error:
+            details.append(f"Error: {task.error}")
+        notification = {
+            "role": "tool",
+            "name": "async_agent_notification",
+            "args": {"async_agent_task_id": async_agent_task_id, "status": task.status},
+            "content": "\n".join(details),
+            "created_at": now(),
+        }
+        self.record(notification)
+        self.record_conversation(notification)
+
+    def interrupt_async_agent(self, async_agent_task_id: str) -> bool:
+        """通过父 agent 注册的后台任务中断指定子 agent。"""
+        task = self._async_agent_tasks.get(async_agent_task_id)
+        if task is None or task.task.done():
+            return False
+        task.task.cancel()
+        return True
+
+    def interrupt_async_agents(self, async_agent_task_ids: list[str] | None = None) -> int:
+        """取消指定子任务；未指定任务 ID 时取消当前父 agent 的全部子任务。"""
+        task_ids = async_agent_task_ids or list(self._async_agent_tasks)
+        return sum(self.interrupt_async_agent(async_agent_task_id) for async_agent_task_id in task_ids)
+
+    def active_async_agent_tasks(self) -> list[AsyncAgentTask]:
+        """返回当前父 agent 仍在运行的后台子任务。"""
+        return [task for task in self._async_agent_tasks.values() if not task.task.done()]
+
+    def record_async_agent_waiting_message(self) -> list[dict[str, str]]:
+        """将活跃子任务清单写入父 agent 会话，要求模型等待或中断。"""
+        active_tasks = self.active_async_agent_tasks()
+        if not active_tasks:
+            return []
+        task_details = [
+            {
+                "asyncAgentTaskId": task.async_agent_task_id,
+                "type": task.agent_type,
+                "task": task.task_prompt,
+            }
+            for task in active_tasks
+        ]
+        lines = ["You tried to finish, but background child agents are still running:"]
+        lines.extend(f"- {item['asyncAgentTaskId']} ({item['type']}): {item['task']}" for item in task_details)
+        lines.append("Call interrupt_agents to stop tasks that are no longer useful. Otherwise return final again to wait for their completion notifications.")
+        message = {"role": "system", "content": "\n".join(lines), "created_at": now()}
+        self.record(message)
+        self.record_conversation(message)
+        return task_details
+
+    def record_async_agents_ready_message(self, async_agent_task_ids: list[str]) -> None:
+        """通知主 agent 已等待完成指定子任务，下一轮应基于通知交付结果。"""
+        task_details = []
+        for async_agent_task_id in async_agent_task_ids:
+            task = self._async_agent_tasks.get(async_agent_task_id)
+            if task is not None:
+                task_details.append(f"- {task.async_agent_task_id} ({task.agent_type}): {task.status}")
+        lines = ["The background child-agent wait has finished."]
+        if task_details:
+            lines.extend(task_details)
+        lines.append(
+            "Use the child-agent notifications already in this conversation to answer the user now. "
+            "Do not call delegate again for a task whose result is already present. "
+            "Only delegate materially new work that is required to answer the user."
         )
-        # 委派的目标是“调查”，不是“放权执行”。
-        # 子 agent 以只读方式运行、步数更少，最后只把结论文本返回给父 agent。
-        child.memory.set_task_summary(task)
-        child.memory.append_note(clip(self.history_text(), 300), source="parent_history")
-        child.session["memory"] = child.memory.to_dict()
-        return SubagentHandle(child, asyncio.create_task(child._consume_subagent_stream(task)))
+        message = {"role": "system", "content": "\n".join(lines), "created_at": now()}
+        self.record(message)
+        self.record_conversation(message)
 
-    async def spawn_delegate(self, args) -> str:
-        """启动子 agent 并等待其调查结论，供异步 delegate 工具调用。"""
-        subagent = await self.start_subagent(args)
-        return "delegate_result:\n" + await subagent.wait()
+    def record_async_agent_try_final(self, answer: str) -> None:
+        """保留尚未交付的候选 final，避免等待后的模型轮次丢失自身决策。"""
+        message = {"role": "assistant", "content": answer, "delivery": "try_final", "created_at": now()}
+        self.record(message)
+        self.record_conversation(message)
+
+    async def wait_for_async_agents(self, async_agent_task_ids: list[str] | None = None) -> None:
+        """等待指定或当前全部仍在运行的父级后台子任务结束。"""
+        task_ids = async_agent_task_ids or list(self._async_agent_tasks)
+        active_tasks = [
+            self._async_agent_tasks[async_agent_task_id].task
+            for async_agent_task_id in task_ids
+            if async_agent_task_id in self._async_agent_tasks and not self._async_agent_tasks[async_agent_task_id].task.done()
+        ]
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+
+    @staticmethod
+    def _async_agent_task_signature(args: Mapping[str, Any]) -> str:
+        """将会影响子 agent 工作范围的字段规范化为父任务内的去重键。"""
+        return json.dumps(
+            {
+                "scope": str(args.get("scope", "")).strip(),
+                "task": str(args.get("task", "")).strip(),
+                "type": str(args.get("type", "default")).strip(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def _worker_worktree_path(self, async_agent_task_id: str) -> Path:
+        """返回当前仓库对应的后台 worker 隔离 worktree 路径。"""
+        repository_key = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()[:12]
+        return Path(tempfile.gettempdir()) / "nano-agent-worktrees" / repository_key / async_agent_task_id
+
+    def _create_worker_worktree(self, async_agent_task_id: str) -> Path:
+        """从当前 HEAD 创建 detached worker worktree。"""
+        worktree_path = self._worker_worktree_path(async_agent_task_id)
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree_path), "HEAD"],
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or result.stdout).strip() or "git worktree add failed")
+        return worktree_path
+
+    def _default_child_session(self, async_agent_task_id: str) -> dict[str, Any]:
+        """复制父会话内容，同时为 default 子 agent 分配独立会话标识。"""
+        session = copy.deepcopy(self.session)
+        session["id"] = f"{self.session['id']}-{async_agent_task_id}"
+        session["created_at"] = now()
+        return session
+
+    async def _delegate_definition(self, async_agent_task_id: str, args: Mapping[str, Any]) -> Any:
+        """根据 delegate type 构建后台运行所需的 agent 配置。"""
+        from nano.runtime.run_agent import AgentDefinition
+
+        agent_type = str(args.get("type", "default"))
+        common = {
+            "model_client": self.model_client,
+            "session_store": self.session_store,
+            "run_store": self.run_store,
+            "max_steps": int(args.get("max_steps", 3)),
+            "max_new_tokens": self.max_new_tokens,
+            "depth": self.depth + 1,
+            "max_depth": self.max_depth,
+            "shell_env_allowlist": self.shell_env_allowlist,
+            "secret_env_names": self.secret_env_names,
+            "feature_flags": self.feature_flags,
+            "instructions": self.agent_instructions,
+        }
+        if agent_type == "explorer":
+            return AgentDefinition(workspace=self.workspace, tools=EXPLORER_TOOLS, approval_policy="never", read_only=True, **common)
+        elif agent_type == "worker":
+            scope = str(args["scope"]).strip()
+            worktree_path = await asyncio.to_thread(self._create_worker_worktree, async_agent_task_id)
+            worktree_root = worktree_path.resolve()
+            task = self._async_agent_tasks[async_agent_task_id]
+            task.worktree_path = str(worktree_root)
+            scoped_root = (worktree_root / scope).resolve()
+            try:
+                scoped_root.relative_to(worktree_root)
+            except ValueError:
+                raise RuntimeError("worker scope is unavailable in the created worktree") from None
+            if not scoped_root.is_dir():
+                raise RuntimeError("worker scope is unavailable in the created worktree")
+            return AgentDefinition(
+                workspace=WorkspaceContext.build(scoped_root, repo_root_override=scoped_root),
+                tools=WORKER_TOOLS,
+                approval_policy="auto",
+                read_only=False,
+                **common,
+            )
+        elif agent_type == "default":
+            return AgentDefinition(
+                workspace=self.workspace,
+                tools=self.allowed_tools,
+                session=self._default_child_session(async_agent_task_id),
+                approval_policy=self.approval_policy,
+                read_only=self.read_only,
+                workspace_mutation_lock=self.workspace_mutation_lock,
+                **common,
+            )
+        raise ValueError(f"unsupported delegate type: {agent_type}")
+
+    async def _run_async_agent(self, async_agent_task_id: str, args: Mapping[str, Any]) -> None:
+        """在后台消费 run_agent 事件，并在终止后通知父 agent。"""
+        from nano.runtime.run_agent import run_agent
+
+        answer = ""
+        status = "failed"
+        error = ""
+        try:
+            definition = await self._delegate_definition(async_agent_task_id, args)
+            agent_type = str(args.get("type", "default"))
+            async for event in run_agent(
+                agent_definition=definition,
+                prompt_messages=str(args["task"]),
+                use_exact_tools=self.use_exact_tools if agent_type == "default" else True,
+                max_turns=self.max_turns if agent_type == "default" else None,
+            ):
+                if event.type == "final":
+                    status = "completed"
+                    answer = str(event.payload.get("answer", ""))
+                elif event.type in {"error", "stopped"}:
+                    status = "stopped" if event.type == "stopped" else "failed"
+                    answer = str(event.payload.get("answer", event.payload.get("message", "")))
+        except asyncio.CancelledError:
+            status = "stopped"
+            answer = "Interrupted by parent agent."
+            raise
+        except Exception as exc:
+            error = str(exc)
+        finally:
+            self.complete_agent_task(async_agent_task_id, status, answer, error)
+            self.enqueue_agent_notification(async_agent_task_id)
+
+    async def spawn_delegate(self, args: Mapping[str, Any]) -> str:
+        """注册后台 delegate 并立即返回其 asyncAgentTaskId，不等待子 agent 运行。"""
+        signature = self._async_agent_task_signature(args)
+        existing_task_id = self._async_agent_task_ids_by_signature.get(signature)
+        if existing_task_id is not None:
+            existing_task = self._async_agent_tasks[existing_task_id]
+            if not existing_task.task.done():
+                return json.dumps({"status": "async_already_running", "asyncAgentTaskId": existing_task_id})
+            if existing_task.status == "completed":
+                return json.dumps({"status": "async_already_completed", "asyncAgentTaskId": existing_task_id})
+            return json.dumps(
+                {
+                    "status": "async_already_finished",
+                    "asyncAgentTaskId": existing_task_id,
+                    "taskStatus": existing_task.status,
+                }
+            )
+        async_agent_task_id = str(uuid.uuid4())
+        background_task = asyncio.create_task(self._run_async_agent(async_agent_task_id, dict(args)))
+        self.register_async_agent(
+            async_agent_task_id,
+            AsyncAgentTask(
+                async_agent_task_id=async_agent_task_id,
+                signature=signature,
+                agent_type=str(args.get("type", "default")),
+                task_prompt=str(args["task"]),
+                task=background_task,
+                scope=str(args.get("scope", "")).strip(),
+            ),
+        )
+        self._async_agent_task_ids_by_signature[signature] = async_agent_task_id
+        return json.dumps({"status": "async_launched", "asyncAgentTaskId": async_agent_task_id})
 
     def tool_list_files(self, args):
         return toolkit.tool_list_files(self.tool_context(), args)

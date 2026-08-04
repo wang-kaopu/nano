@@ -4,10 +4,11 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
+import json
 import shutil
 import subprocess
 import textwrap
-from typing import Annotated, Any, Callable, Mapping, Type
+from typing import Annotated, Any, Callable, Literal, Mapping, Type
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -89,10 +90,24 @@ class PatchFileArguments(ToolArguments):
 
 
 class DelegateArguments(ToolArguments):
-    """委派只读子任务所需的参数。"""
+    """异步委派子任务所需的参数。"""
 
     task: NonEmptyText
+    type: Literal["explorer", "worker", "default"] = Field(
+        default="default",
+        description="explorer is required for reading/searching/reviewing; worker is only for scoped code changes; default inherits the parent context.",
+    )
+    scope: str = Field(
+        default="",
+        description="Only for worker: an existing non-root directory such as 'nano/runtime', never a file name or a natural-language task description.",
+    )
     max_steps: int = Field(default=3, ge=1)
+
+
+class InterruptAgentsArguments(ToolArguments):
+    """中断后台子任务所需的参数。"""
+
+    async_agent_task_ids: list[str] = Field(default_factory=list)
 
 
 class SkillArguments(ToolArguments):
@@ -256,7 +271,8 @@ TOOL_EXAMPLES = {
     "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run pytest -q","timeout":20}}</tool>',
     "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
     "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","type":"explorer","max_steps":3}}</tool>',
+    "interrupt_agents": '<tool>{"name":"interrupt_agents","args":{"async_agent_task_ids":["task-id"]}}</tool>',
     "skill": '<tool>{"name":"skill","args":{"skill_name":"commit","args":"stage the current changes"}}</tool>',
 }
 
@@ -267,8 +283,7 @@ def build_tool_registry(context: ToolContext) -> dict[str, Tool[ToolArguments, s
     tools: dict[str, Tool[ToolArguments, str, ToolProgressData]] = {
         tool.name: tool for tool in TOOL_DEFINITIONS if tool.name != "delegate"
     }
-    # 子 agent 是刻意做成受限能力的：一旦深度耗尽，
-    # 就连 delegate 这个工具都不再暴露给模型。
+    # 子 agent 的递归委派需要明确受深度上限约束。
     if context.depth < context.max_depth:
         delegate = next(tool for tool in TOOL_DEFINITIONS if tool.name == "delegate")
         tools[delegate.name] = delegate
@@ -357,6 +372,18 @@ def _validate_workspace_input(context: ToolContext, name: str, args: ToolArgumen
             raise ValueError("task must not be empty")
         if context.depth >= context.max_depth:
             raise ValueError("delegate depth exceeded")
+        if str(args.get("type", "default")) == "worker":
+            scope = str(args.get("scope", "")).strip()
+            if not scope or scope == ".":
+                raise ValueError("worker delegate requires an existing non-root directory; reading files must use type=explorer without scope")
+            scope_path = context.path(scope)
+            if not scope_path.is_dir():
+                raise ValueError("worker scope must be an existing directory; reading files must use type=explorer without scope")
+        return
+
+    if name == "interrupt_agents":
+        if any(not str(task_id).strip() for task_id in args.get("async_agent_task_ids", [])):
+            raise ValueError("async_agent_task_ids must not contain empty values")
         return
 
     if name == "skill":
@@ -492,13 +519,20 @@ def tool_patch_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
 
 
 async def tool_delegate(context: ToolContext, args: ToolArgumentsPayload) -> str:
-    """异步启动只读子 agent，并等待它返回调查结论。"""
+    """登记后台子 agent，并立即返回其任务标识。"""
     if context.depth >= context.max_depth:
         raise ValueError("delegate depth exceeded")
     task = str(args.get("task", "")).strip()
     if not task:
         raise ValueError("task must not be empty")
     return await context.spawn_delegate(args)
+
+
+async def tool_interrupt_agents(context: ToolContext, args: ToolArgumentsPayload) -> str:
+    """中断指定后台子任务；未指定时中断全部子任务。"""
+    task_ids = [str(task_id).strip() for task_id in args.get("async_agent_task_ids", [])]
+    cancelled_count = context.interrupt_agents(task_ids)
+    return json.dumps({"status": "interrupt_requested", "cancelledCount": cancelled_count, "asyncAgentTaskIds": task_ids})
 
 
 def tool_skill(context: ToolContext, args: ToolArgumentsPayload) -> str:
@@ -573,12 +607,35 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
     WorkspaceTool(
         name="delegate",
         input_schema=DelegateArguments,
-        description_text="Ask a bounded read-only child agent to investigate.",
-        prompt_text="Use delegate for bounded read-only investigation when a separate exploration pass helps.",
+        description_text="Launch an asynchronous explorer, worker, or default child agent.",
+        prompt_text=(
+            "Use delegate to launch background work. Choose every parameter before calling it. type=explorer is mandatory for reading files, searching, "
+            "reviewing, or collecting facts; explorer has empty history and never uses scope. type=worker is only for modifying code in an isolated "
+            "worktree; scope must be an existing non-root directory such as 'nano/runtime', never '.', a file path, or a task sentence. type=default is "
+            "only for work that requires this agent's full context and tool access. Set max_steps from the child task: use 3 for one short file read; use 4 "
+            "when a file may need multiple reads or existence checking; use 5 for multi-file investigation or search; use 6 or more for scoped code changes "
+            "and verification. Do not use max_steps 1 or 2 when the child must inspect and report. Examples: read README.md completely => explorer, "
+            "max_steps=4; read .env if it exists => explorer, max_steps=4; read pyproject.toml => explorer, max_steps=3; modify nano/runtime => worker, "
+            "scope='nano/runtime', max_steps=6. After all planned delegate calls return async_launched, your next response must be final and say that you "
+            "are waiting for the listed child agents. The runtime will convert that final into automatic waiting and then deliver completion notifications in "
+            "a new model turn. Never poll child status with run_shell, sleep, ls, find, cat, Python, or by inspecting .nano/runs. Do not launch duplicate "
+            "delegates while waiting. Call interrupt_agents only when a child result is no longer useful. Once notifications arrive, summarize their results "
+            "for the user in final. Default shares the main workspace mutation lock, while explorer and worker start with empty history."
+        ),
         runner=None,
         async_runner=tool_delegate,
         read_only=True,
         concurrency_safe=False,
+    ),
+    WorkspaceTool(
+        name="interrupt_agents",
+        input_schema=InterruptAgentsArguments,
+        description_text="Interrupt selected background child agents, or all of them when no IDs are supplied.",
+        prompt_text="Use interrupt_agents only when waiting for a child agent is no longer useful.",
+        runner=None,
+        async_runner=tool_interrupt_agents,
+        read_only=True,
+        concurrency_safe=True,
     ),
     WorkspaceTool(
         name="skill",

@@ -268,13 +268,16 @@ def test_delegate_depth_limit_is_enforced(tmp_path):
         raise AssertionError("delegate depth validation did not fail")
 
 
-def test_delegate_child_is_read_only(tmp_path):
+def test_explorer_delegate_child_is_read_only(tmp_path):
     target = tmp_path / "child-was-not-allowed.txt"
     runtime = build_agent(
         tmp_path,
         [
-            '<tool>{"name":"delegate","args":{"task":"write a file","max_steps":2}}</tool>',
+            '<tool>{"name":"delegate","args":{"task":"write a file","type":"explorer","max_steps":2}}</tool>',
             '<tool>{"name":"write_file","args":{"path":"child-was-not-allowed.txt","content":"nope"}}</tool>',
+            "<final>parent done</final>",
+            "<final>explorer done</final>",
+            "<final>parent done</final>",
             "<final>parent done</final>",
         ],
     )
@@ -284,8 +287,9 @@ def test_delegate_child_is_read_only(tmp_path):
     assert result == "parent done"
     assert not target.exists()
     tool_events = [item for item in runtime.session["history"] if item["role"] == "tool"]
-    assert tool_events[0]["name"] == "delegate"
-    assert "delegate_result" in tool_events[0]["content"]
+    delegate_event = next(item for item in tool_events if item["name"] == "delegate")
+    assert '"status": "async_launched"' in delegate_event["content"]
+    assert any(item["name"] == "async_agent_notification" for item in tool_events)
 
 
 def test_configured_secret_env_names_are_redacted_in_trace_and_report(tmp_path):

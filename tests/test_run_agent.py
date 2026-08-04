@@ -70,6 +70,7 @@ def test_build_runtime_uses_the_supplied_tool_context_and_exact_tool_setting(tmp
         depth=0,
         max_depth=0,
         spawn_delegate=lambda args: "unused",
+        interrupt_agents=lambda task_ids: 0,
     )
 
     runtime = build_runtime(definition, tool_use_context=context, use_exact_tools=True, max_turns=3)

@@ -13,6 +13,7 @@ from nano.utils.text import clip, now
 
 
 MICROCOMPACT_IDLE_S = 5 * 60
+MAX_INVALID_TOOL_CALLS = 3
 
 
 class QueryLoop:
@@ -26,6 +27,28 @@ class QueryLoop:
         self.memory_prefetch = memory_prefetch
         self.injected_memories = []
         self.max_attempts = max(runtime.max_steps * 3, runtime.max_steps + 4)
+        self.awaiting_async_agent_decision = False
+        self.awaited_async_agent_task_ids: list[str] = []
+
+    async def _defer_try_final(self, answer: str) -> tuple[str, list[dict[str, str]]]:
+        """将有活跃子任务时的 final 转换为中断决策或自动等待。"""
+        if self.awaiting_async_agent_decision:
+            self.runtime.record_async_agent_try_final(answer)
+            await self.runtime.wait_for_async_agents(self.awaited_async_agent_task_ids)
+            self.awaiting_async_agent_decision = False
+            self.runtime.awaiting_async_agent_decision = False
+            self.runtime.record_async_agents_ready_message(self.awaited_async_agent_task_ids)
+            self.awaited_async_agent_task_ids = []
+            return "waited", []
+        active_tasks = self.runtime.active_async_agent_tasks()
+        if not active_tasks:
+            return "", []
+        self.runtime.record_async_agent_try_final(answer)
+        task_details = self.runtime.record_async_agent_waiting_message()
+        self.awaited_async_agent_task_ids = [item["asyncAgentTaskId"] for item in task_details]
+        self.awaiting_async_agent_decision = True
+        self.runtime.awaiting_async_agent_decision = True
+        return "decision", task_details
 
     def _budget_tool_results_anthropic(self, messages: list[dict[str, Any]]) -> None:
         """按上次请求的上下文利用率裁剪 Anthropic 工具结果副本。"""
@@ -326,7 +349,11 @@ class QueryLoop:
                         tool_task.add_done_callback(self.runtime._active_tool_tasks.discard)
                         yield QueryEvent("tool_started", {"name": name, "args": args})
                         tool_result = await asyncio.shield(tool_task)
-                    self.task_state.record_tool(name)
+                    tool_status = str(tool_result.metadata.get("tool_status", ""))
+                    if tool_status == "rejected":
+                        self.task_state.record_invalid_tool(name)
+                    else:
+                        self.task_state.record_tool(name)
                     result = tool_result.content
                     self.runtime.record(
                         {
@@ -375,6 +402,9 @@ class QueryLoop:
                     if tool_result.metadata.get("tool_error_code") == "approval_denied":
                         yield QueryEvent("stopped", {"reason": "approval_denied"})
                         return
+                if self.task_state.invalid_tool_calls >= MAX_INVALID_TOOL_CALLS:
+                    yield QueryEvent("stopped", {"reason": "invalid_tool_call_limit_reached"})
+                    return
                 if anthropic_tool_results:
                     native_input.append({"role": "user", "content": anthropic_tool_results})
                 yield QueryEvent("next_turn", {"reason": "next_turn"})
@@ -385,6 +415,13 @@ class QueryLoop:
                 if not final:
                     yield QueryEvent("error", {"message": "native tool-call response completed without text or a function call"})
                     return
+                try_final_state, active_tasks = await self._defer_try_final(final)
+                if try_final_state:
+                    native_input.clear()
+                    if try_final_state == "decision":
+                        yield QueryEvent("try_final", {"answer": final, "active_async_agents": active_tasks})
+                    yield QueryEvent("next_turn", {"reason": "async_agents_waited" if try_final_state == "waited" else "async_agents_running"})
+                    continue
                 self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
                 self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
                 yield QueryEvent("final", {"answer": final})
@@ -398,6 +435,12 @@ class QueryLoop:
                 continue
 
             final = (payload or raw).strip()
+            try_final_state, active_tasks = await self._defer_try_final(final)
+            if try_final_state:
+                if try_final_state == "decision":
+                    yield QueryEvent("try_final", {"answer": final, "active_async_agents": active_tasks})
+                yield QueryEvent("next_turn", {"reason": "async_agents_waited" if try_final_state == "waited" else "async_agents_running"})
+                continue
             self.runtime.record({"role": "assistant", "content": final, "created_at": now()})
             self.runtime.record_conversation({"role": "assistant", "content": final, "created_at": now()})
             yield QueryEvent("final", {"answer": final})

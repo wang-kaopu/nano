@@ -27,6 +27,7 @@ STOP_REASON_DELEGATE_FAILED = "delegate_failed"
 STOP_REASON_PERSISTENCE_ERROR = "persistence_error"
 STOP_REASON_RESUME_LOAD_ERROR = "resume_load_error"
 STOP_REASON_USER_INTERRUPTED = "user_interrupted"
+STOP_REASON_INVALID_TOOL_CALL_LIMIT_REACHED = "invalid_tool_call_limit_reached"
 
 
 class TaskState(BaseModel):
@@ -39,6 +40,7 @@ class TaskState(BaseModel):
     user_request: str
     status: TaskStatus = STATUS_RUNNING
     tool_steps: int = Field(default=0, ge=0)
+    invalid_tool_calls: int = Field(default=0, ge=0)
     attempts: int = Field(default=0, ge=0)
     last_tool: str = ""
     stop_reason: str = ""
@@ -68,6 +70,12 @@ class TaskState(BaseModel):
         """记录一次实际执行的工具调用。"""
         # tool_steps 只统计真正进入执行阶段的工具调用次数。
         self.tool_steps += 1
+        self.last_tool = str(name or "")
+        return self
+
+    def record_invalid_tool(self, name: str) -> "TaskState":
+        """记录一次被护栏拒绝的工具调用，不消耗正常工作步骤预算。"""
+        self.invalid_tool_calls += 1
         self.last_tool = str(name or "")
         return self
 
@@ -103,6 +111,10 @@ class TaskState(BaseModel):
     def stop_user_interrupted(self, final_answer: str = "") -> "TaskState":
         """标记当前请求由用户主动打断。"""
         return self.stop(STOP_REASON_USER_INTERRUPTED, final_answer=final_answer)
+
+    def stop_invalid_tool_call_limit(self, final_answer: str = "") -> "TaskState":
+        """标记运行因连续无效工具调用过多而结束。"""
+        return self.stop(STOP_REASON_INVALID_TOOL_CALL_LIMIT_REACHED, final_answer=final_answer)
 
     def finish_success(self, final_answer: str) -> "TaskState":
         """标记运行成功并保存最终答案。"""

@@ -92,38 +92,44 @@ class QueryEngine:
                     )
                 elif event.type == "retry":
                     runtime.run_store.write_task_state(task_state)
-                elif event.type == "final":
-                    final = event.payload["answer"]
-                    runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
-                    self._finish_success(task_state, user_message, final, run_started_at)
-                    yield event
-                    return
-                elif event.type == "error":
-                    final = event.payload["message"]
-                    task_state.stop_model_error(final)
-                    runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                    self._finish_stopped(task_state, user_message, final, run_started_at)
-                    yield QueryEvent("error", {"message": final, "answer": final})
-                    return
-                elif event.type == "stopped":
-                    if event.payload["reason"] == "retry_limit_reached":
-                        final = "Stopped after too many malformed model responses without a valid tool call or final answer."
-                        task_state.stop_retry_limit(final)
-                    elif event.payload["reason"] == "turn_limit_reached":
-                        final = "Stopped after reaching the turn limit without a final answer."
-                        task_state.stop_turn_limit(final)
-                    elif event.payload["reason"] == "approval_denied":
-                        final = "Operation was not executed because approval was denied."
-                        task_state.stop_approval_denied(final)
-                    else:
-                        final = "Stopped after reaching the step limit without a final answer."
-                        task_state.stop_step_limit(final)
-                    runtime.record({"role": "assistant", "content": final, "created_at": now()})
-                    self._finish_stopped(task_state, user_message, final, run_started_at)
-                    yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
-                    return
+                elif event.type in {"final", "error", "stopped"}:
+                    await runtime.wait_for_async_agents()
+                    if event.type == "final":
+                        final = event.payload["answer"]
+                        runtime.emit_trace(task_state, "model_parsed", {"kind": "final", "completion_metadata": runtime.last_completion_metadata})
+                        self._finish_success(task_state, user_message, final, run_started_at)
+                        yield event
+                        return
+                    if event.type == "error":
+                        final = event.payload["message"]
+                        task_state.stop_model_error(final)
+                        runtime.record({"role": "assistant", "content": final, "created_at": now()})
+                        self._finish_stopped(task_state, user_message, final, run_started_at)
+                        yield QueryEvent("error", {"message": final, "answer": final})
+                        return
+                    if event.type == "stopped":
+                        if event.payload["reason"] == "retry_limit_reached":
+                            final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+                            task_state.stop_retry_limit(final)
+                        elif event.payload["reason"] == "invalid_tool_call_limit_reached":
+                            final = "Stopped after too many invalid tool calls. Review the latest tool error and choose the corrected action."
+                            task_state.stop_invalid_tool_call_limit(final)
+                        elif event.payload["reason"] == "turn_limit_reached":
+                            final = "Stopped after reaching the turn limit without a final answer."
+                            task_state.stop_turn_limit(final)
+                        elif event.payload["reason"] == "approval_denied":
+                            final = "Operation was not executed because approval was denied."
+                            task_state.stop_approval_denied(final)
+                        else:
+                            final = "Stopped after reaching the step limit without a final answer."
+                            task_state.stop_step_limit(final)
+                        runtime.record({"role": "assistant", "content": final, "created_at": now()})
+                        self._finish_stopped(task_state, user_message, final, run_started_at)
+                        yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
+                        return
                 yield event
         except asyncio.CancelledError:
+            runtime.interrupt_async_agents()
             active_tool_tasks = list(runtime._active_tool_tasks)
             if active_tool_tasks:
                 await asyncio.shield(asyncio.gather(*active_tool_tasks, return_exceptions=True))
@@ -134,6 +140,7 @@ class QueryEngine:
             yield QueryEvent("stopped", {"reason": task_state.stop_reason, "answer": final})
             return
         finally:
+            runtime.awaiting_async_agent_decision = False
             if memory_prefetch is not None and not memory_prefetch.settled:
                 memory_prefetch.task.cancel()
             runtime._current_query_task = None

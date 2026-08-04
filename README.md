@@ -112,16 +112,22 @@ async for event in run_agent(
 ```
 
 `run_agent` 产出 `QueryEvent`，并始终在独立 asyncio Task 中执行运行循环。`max_turns`
-限制模型循环次数；`use_exact_tools=True` 时，delegate fork 仅继承当前 `tools` 白名单。
+限制模型循环次数；`use_exact_tools=True` 时严格应用 `AgentDefinition.tools` 白名单。
 
-运行中的父 agent 可以异步启动只读子 agent，并按需要等待它的最终结论。子 agent 会在
-自己的 Task 中消费和处理完整的 QueryLoop 事件流，不会通过同步调用阻塞父 agent：
+`delegate` 始终以后台任务运行并立刻返回 `{"status":"async_launched","asyncAgentTaskId":"..."}`。
+父 agent 会在子任务结束时收到 `async_agent_notification`，其中包含最终结果；父请求被中断时，
+运行时会先取消全部未完成的子任务。若父 agent 在子任务运行时尝试结束，运行时会发起 `try_final`，
+让模型调用 `interrupt_agents` 取消不再需要的任务，或自动等待完成通知后基于结果生成最终回答。候选回答会保留在会话中；
+等待决策期间仅允许调用 `interrupt_agents`，相同 `type`、`task`、`scope` 的重复委派会返回已有任务状态而不会重复启动。
+主 agent 默认有 12 个成功工具步骤；参数校验拒绝不会消耗此预算，但累计 3 次无效工具调用会停止并要求根据最新错误修正操作。
 
-```python
-subagent = await parent_runtime.start_subagent({"task": "检查认证流程", "max_steps": 3})
+- `explorer`：空会话历史，只暴露只读工具。
+- `worker`：空会话历史，必须提供现有目录 `scope`；运行时会新建 detached Git worktree，且只暴露该目录内的文件读写工具。完成通知会给出保留的 worktree 路径。
+- `default`：继承父 agent 的会话、工具白名单、运行配置与主工作区变更锁；`write_file`、`patch_file`、`run_shell` 会与父级及其他 default 子 agent 串行执行。
 
-# 父 agent 可在此期间继续执行其他异步工作。
-result = await subagent.wait()
+```text
+<tool>{"name":"delegate","args":{"task":"检查认证流程","type":"explorer","max_steps":3}}</tool>
+<tool>{"name":"delegate","args":{"task":"修改认证模块","type":"worker","scope":"nano/runtime","max_steps":6}}</tool>
 ```
 
 ## 快速开始

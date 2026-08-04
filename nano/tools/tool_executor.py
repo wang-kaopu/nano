@@ -125,6 +125,20 @@ class ToolExecutor:
                 ),
             )
 
+        if runtime.awaiting_async_agent_decision and tool.name != "interrupt_agents":
+            return ToolExecutionResult(
+                content=(
+                    "error: background child agents are awaiting a wait-or-interrupt decision; "
+                    "only interrupt_agents is available until you return a final answer to wait for their notifications"
+                ),
+                metadata=_metadata(
+                    "rejected",
+                    tool_error_code="async_agent_waiting",
+                    risk_level="low",
+                    read_only=True,
+                ),
+            )
+
         input_value: Any = None
         try:
             input_value = tool.parse_input(args)
@@ -249,11 +263,18 @@ class ToolExecutor:
             return ToolExecutionResult(content=f"error: tool {name} failed: {exc}", metadata=metadata)
 
     async def execute_async(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:
-        """异步执行工具；delegate 直接在事件循环中协调子 agent。"""
+        """异步执行工具，并在事件循环内处理后台 agent 管理动作。"""
         tool = self.runtime.tools.get(name)
         if tool is None:
             tool = next((candidate for candidate in self.runtime.tools.values() if name in candidate.aliases), None)
-        if not isinstance(tool, WorkspaceTool) or tool.name != "delegate":
+        if not isinstance(tool, WorkspaceTool) or tool.async_runner is None:
+            try:
+                concurrency_safe = tool is not None and tool.is_concurrency_safe(tool.parse_input(args))
+            except Exception:
+                concurrency_safe = False
+            if not concurrency_safe:
+                async with self.runtime.workspace_mutation_lock:
+                    return await asyncio.to_thread(self.execute, name, args)
             return await asyncio.to_thread(self.execute, name, args)
 
         runtime = self.runtime

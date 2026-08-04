@@ -15,6 +15,7 @@ class ToolContext:
     depth: int
     max_depth: int
     spawn_delegate: Callable[[Mapping[str, Any]], Any]
+    interrupt_agents: Callable[[list[str]], int]
     read_file_state: dict[str, int] = field(default_factory=dict)
     permissions: ProjectPermissions = field(default_factory=ProjectPermissions.empty)
 

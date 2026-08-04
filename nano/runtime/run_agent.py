@@ -31,7 +31,7 @@ class AgentDefinition:
     session: dict[str, Any] | None = None
     run_store: RunStore | None = None
     approval_policy: str = "ask"
-    max_steps: int = 6
+    max_steps: int = 12
     max_new_tokens: int = 512
     depth: int = 0
     max_depth: int = 1
@@ -39,6 +39,7 @@ class AgentDefinition:
     shell_env_allowlist: Iterable[str] | None = None
     secret_env_names: Iterable[str] | None = None
     feature_flags: Mapping[str, bool] | None = None
+    workspace_mutation_lock: asyncio.Lock | None = None
 
 
 def _normalize_prompt_messages(prompt_messages: PromptMessage | Iterable[PromptMessage]) -> str:
@@ -91,6 +92,7 @@ def build_runtime(
         use_exact_tools=use_exact_tools,
         max_turns=max_turns,
         agent_instructions=agent_definition.instructions,
+        workspace_mutation_lock=agent_definition.workspace_mutation_lock,
     )
 
 
@@ -105,7 +107,7 @@ async def run_agent(
     """启动 agent 并持续产出 QueryEvent 事件。
 
     运行循环始终在独立 asyncio Task 中推进，事件通过队列交付给宿主。
-    `use_exact_tools` 会让 delegate fork 继承当前工具白名单，而不是重新暴露默认工具集。
+    `use_exact_tools` 会严格应用 AgentDefinition 中声明的工具白名单。
     `max_turns` 限制模型循环次数；未设置时保留现有 runtime 的格式重试容量。
     """
     user_message = _normalize_prompt_messages(prompt_messages)
