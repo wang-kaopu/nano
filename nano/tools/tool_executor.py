@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.runtime.runtime import AgentRuntime
-from nano.tools.tools import tool_definition
+from nano.tools.tools import WorkspaceTool, tool_definition
 from nano.utils.text import clip
 
 
@@ -253,7 +253,7 @@ class ToolExecutor:
         tool = self.runtime.tools.get(name)
         if tool is None:
             tool = next((candidate for candidate in self.runtime.tools.values() if name in candidate.aliases), None)
-        if tool is None or tool.name != "delegate":
+        if not isinstance(tool, WorkspaceTool) or tool.name != "delegate":
             return await asyncio.to_thread(self.execute, name, args)
 
         runtime = self.runtime

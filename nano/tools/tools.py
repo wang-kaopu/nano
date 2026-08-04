@@ -4,7 +4,6 @@
 如何做参数校验，以及最终如何执行，都是在这里定义的。
 """
 
-import asyncio
 import shutil
 import subprocess
 import textwrap
@@ -203,9 +202,9 @@ class WorkspaceTool(Tool[ToolArguments, str, ToolProgressData]):
         parent_message: str | None,
         on_progress: ProgressCallback | None = None,
     ) -> ToolResult[str]:
-        """异步执行工具；未提供异步 runner 时转入工作线程运行同步实现。"""
+        """执行显式声明的异步 runner。"""
         if self.async_runner is None:
-            return await asyncio.to_thread(self.call, args, context, can_use_tool, parent_message, on_progress)
+            raise RuntimeError(f"tool '{self.name}' does not provide an async runner")
         if not can_use_tool(self, args):
             raise PermissionError(f"tool '{self.name}' is not allowed in this run")
         if on_progress is not None:
