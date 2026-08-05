@@ -51,7 +51,10 @@ class ReadFileArguments(ToolArguments):
         """确保游标模式和显式范围模式不会混用。"""
         if self.cursor:
             if self.start is not None or self.end is not None:
-                raise ValueError("cursor cannot be combined with start or end")
+                # 游标优先：模型可能同时传了 cursor 和 start/end，
+                # 使用游标模式并忽略范围参数，避免因参数冲突导致工具调用失败
+                object.__setattr__(self, "start", None)
+                object.__setattr__(self, "end", None)
             return self
         if self.start is None:
             self.start = 1

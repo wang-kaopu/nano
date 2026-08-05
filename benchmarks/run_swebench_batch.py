@@ -437,20 +437,47 @@ def build_model_client(config: BatchConfig) -> Any:
 
 
 def build_agent_prompt(instance: dict[str, Any]) -> str:
-    """构建仅含公开信息的 prompt。"""
+    """构建仅含公开信息的 prompt，引导 Agent 完成完整的 fix→test 循环。"""
     return textwrap.dedent(f"""\
         Fix {instance['instance_id']}.
 
         {instance['problem_statement']}
 
-        Inspect the current workspace, identify the root cause, make the
-        smallest correct fix, add focused public regression coverage when
-        appropriate, and run the most relevant tests.
+        # Workflow — follow these steps IN ORDER
 
-        Do not access network resources.
-        Do not access files outside this workspace.
-        Do not use SWE-bench gold patches or hidden test data.
-        Do not stop after explaining the solution; implement it in the workspace.
+        1. **Explore**: use read_file / list_files / grep_search to locate the
+           relevant source files and understand the root cause.
+        2. **Fix**: use patch_file to apply the minimal correct change. Output a
+           unified diff. Never stop at "I found the bug" — you MUST edit the file.
+        3. **Verify**: use run_shell to execute the relevant tests (pytest, python).
+           The testbed already has compiled C extensions — do NOT run pip install
+           or setup.py build_ext (they will always fail without network).
+
+        ## patch_file usage
+
+        patch_file requires a unified diff. Example for changing line 42 of
+        astropy/modeling/separable.py from `x = 1` to `x = 2`:
+
+        --- a/astropy/modeling/separable.py
+        +++ b/astropy/modeling/separable.py
+        @@ -40,7 +40,7 @@
+         import numpy as np
+
+        -x = 1
+        +x = 2
+
+         def separable_matrix(model):
+
+        ## Rules
+
+        - Always call patch_file before the run_shell verification step.
+        - Use the smallest diff possible — one focused change per file.
+        - You CAN run python, pytest, grep, sed, cat, find, head, tail inside run_shell.
+        - Do NOT run: pip install, setup.py build_ext, curl, wget, apt, yum.
+        - Do not access network resources.
+        - Do not access files outside this workspace.
+        - Do not use SWE-bench gold patches or hidden test data.
+        - Do not stop after explaining the solution; implement it in the workspace.
     """)
 
 

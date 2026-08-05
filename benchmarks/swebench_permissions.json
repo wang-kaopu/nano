@@ -9,7 +9,11 @@
         "pytest", "pytest *", "python -m pytest", "python -m pytest *", "python3 -m pytest", "python3 -m pytest *",
         "ruff", "ruff *", "black --check", "black --check *", "git status", "git status *", "git diff", "git diff *"
       ],
-      "deny": ["docker*", "* docker*", "curl*", "wget*", "rm *", "git config*", "git remote*", "git worktree*", "git checkout*", "git reset*", "git clean*"]
+      "deny": [
+        "docker*", "* docker*", "curl*", "wget*", "rm *",
+        "git config*", "git remote*", "git worktree*", "git checkout*", "git reset*", "git clean*",
+        "*pip install*", "*pip3 install*", "*setup.py*", "*build_ext*", "apt*", "yum*", "dnf*", "brew*"
+      ]
     }
   }
 }
