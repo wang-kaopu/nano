@@ -35,6 +35,7 @@ from run_swebench_batch import (
     timed_log,
     now_iso,
     check_environment,
+    _ensure_gitignore_patterns,
 )
 
 
@@ -431,3 +432,76 @@ class TestTimestamps:
         ts = now_iso()
         assert isinstance(ts, str)
         assert "T" in ts
+
+
+# ---------------------------------------------------------------------------
+# Warmup / .gitignore 编译产物保护
+# ---------------------------------------------------------------------------
+
+
+class TestGitignorePatterns:
+    def test_adds_missing_patterns(self, tmp_path):
+        w = tmp_path / "repo"
+        w.mkdir()
+        (w / ".gitignore").write_text("*.pyc\n")
+        _ensure_gitignore_patterns(w)
+        content = (w / ".gitignore").read_text()
+        assert "*.so" in content
+        assert "__pycache__/" in content
+        assert "build/" in content
+
+    def test_no_duplicates(self, tmp_path):
+        w = tmp_path / "repo"
+        w.mkdir()
+        (w / ".gitignore").write_text("*.so\n*.pyc\n__pycache__/\nbuild/\n")
+        _ensure_gitignore_patterns(w)
+        content = (w / ".gitignore").read_text()
+        # 每个 pattern 只出现一次
+        assert content.count("*.so") == 1
+        assert content.count("*.pyc") == 1
+
+    def test_creates_gitignore_if_missing(self, tmp_path):
+        w = tmp_path / "repo"
+        w.mkdir()
+        _ensure_gitignore_patterns(w)
+        assert (w / ".gitignore").exists()
+        content = (w / ".gitignore").read_text()
+        assert "*.so" in content
+
+
+class TestGitDiffExcludes:
+    def test_excludes_dot_so_files(self, tmp_path):
+        """编译产物 .so 不应出现在 diff 中。"""
+        worktree = tmp_path / "repo"
+        worktree.mkdir()
+        subprocess = __import__("subprocess")
+        subprocess.run(["git", "-C", str(worktree), "init"], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@test"], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "test"], capture_output=True)
+        (worktree / "f.py").write_text("x")
+        subprocess.run(["git", "-C", str(worktree), "add", "."], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "-m", "init"], capture_output=True)
+        # 创建 .so 和正常的修改
+        (worktree / "lib.so").write_text("binary")
+        (worktree / "f.py").write_text("y")
+        patch = git_diff_worktree(worktree)
+        assert "f.py" in patch
+        assert "lib.so" not in patch
+
+    def test_excludes_build_directory(self, tmp_path):
+        worktree = tmp_path / "repo"
+        worktree.mkdir()
+        subprocess = __import__("subprocess")
+        subprocess.run(["git", "-C", str(worktree), "init"], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@test"], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "config", "user.name", "test"], capture_output=True)
+        (worktree / "f.py").write_text("x")
+        subprocess.run(["git", "-C", str(worktree), "add", "."], capture_output=True)
+        subprocess.run(["git", "-C", str(worktree), "commit", "-m", "init"], capture_output=True)
+        (worktree / "build").mkdir()
+        (worktree / "build" / "output.o").write_text("obj")
+        (worktree / "f.py").write_text("y")
+        patch = git_diff_worktree(worktree)
+        assert "f.py" in patch
+        assert "build/" not in patch
+        assert "output.o" not in patch

@@ -324,7 +324,10 @@ def git_diff_worktree(worktree: Path) -> str:
         shutil.move(str(nano_dir), str(nano_stash))
     try:
         run_cmd(["git", "-C", str(worktree), "add", "-N", "."], check=False)
-        result = run_cmd(["git", "-C", str(worktree), "diff", "HEAD", "--binary", "--no-ext-diff"], check=False)
+        result = run_cmd([
+            "git", "-C", str(worktree), "diff", "HEAD", "--binary", "--no-ext-diff",
+            "--", ".", ":(exclude)*.so", ":(exclude)*.pyc", ":(exclude)build/",
+        ], check=False)
         run_cmd(["git", "-C", str(worktree), "reset"], check=False)
     finally:
         if nano_stash is not None and nano_stash.exists():
@@ -339,6 +342,105 @@ def git_diff_worktree(worktree: Path) -> str:
 def worktree_is_dirty(worktree: Path) -> bool:
     result = run_cmd(["git", "-C", str(worktree), "status", "--porcelain"], check=False)
     return bool(result.stdout.strip())
+
+
+# ---------------------------------------------------------------------------
+# Worktree 预热 — 从 Docker 镜像提取编译产物，使 Python import 可用
+# ---------------------------------------------------------------------------
+
+
+def _ensure_gitignore_patterns(worktree: Path) -> None:
+    """确保 worktree 的 .gitignore 包含编译产物的排除模式。"""
+    gitignore = worktree / ".gitignore"
+    patterns = ["*.so", "*.pyc", "__pycache__/", "build/"]
+    existing = set()
+    if gitignore.exists():
+        existing = {line.strip() for line in gitignore.read_text().splitlines()}
+    missing = [p for p in patterns if p not in existing]
+    if missing:
+        with open(gitignore, "a") as f:
+            f.write("\n# pico: warmup artifacts (auto-added)\n")
+            for p in missing:
+                f.write(p + "\n")
+
+
+def warmup_worktree(image: str, worktree: Path, instance_id: str) -> bool:
+    """从 Docker 镜像的 /testbed 复制预编译 C 扩展到 worktree。
+
+    镜像里的 /testbed 有编译好的 .so 文件，但 worktree 是从 git 缓存创建
+    的干净 checkout（只有源代码）。本函数在 worktree 被挂载覆盖 /testbed 之
+    前，先把镜像里的编译产物复制到 worktree，使 ``import astropy`` 和
+    ``pytest`` 在 Agent 容器内能正常工作。
+    """
+    temp_name = f"pico-warmup-{uuid.uuid4().hex[:8]}"
+    timed_log(f"  [{instance_id}] 从镜像提取编译产物...")
+
+    # 启动临时容器：worktree 挂载到 /worktree，镜像的 /testbed 保持不变
+    result = run_cmd([
+        "docker", "run", "--detach", "--name", temp_name,
+        "--network", "none",
+        "--volume", f"{worktree}:/worktree:rw",
+        "--entrypoint", "sleep", image, "3600",
+    ], timeout=30, check=False)
+
+    if result.returncode != 0:
+        timed_log(f"  [{instance_id}] 预热容器启动失败: {result.stderr.strip()[-200:]}")
+        return False
+
+    try:
+        # 策略 1：从镜像 /testbed 复制所有 .so 文件到 worktree（秒级完成）
+        timed_log(f"  [{instance_id}] 复制 .so 文件...")
+        copy_cmd = (
+            "cd /testbed && find . -name '*.so' -exec sh -c '"
+            "  mkdir -p /worktree/$(dirname \"$1\") && cp \"$1\" \"/worktree/$1\""
+            "' _ {} \\; && echo OK"
+        )
+        copy_result = run_cmd([
+            "docker", "exec", temp_name, "bash", "-lc", copy_cmd,
+        ], timeout=120, check=False)
+
+        if copy_result.returncode != 0 or "OK" not in copy_result.stdout:
+            timed_log(f"  [{instance_id}] .so 复制失败: {copy_result.stderr[:200]}")
+
+            # 策略 2：尝试 build_ext --inplace 编译（不需要网络，但需要 gcc）
+            timed_log(f"  [{instance_id}] 尝试编译 C 扩展...")
+            build_cmd = (
+                "cd /worktree && python setup.py build_ext --inplace 2>&1"
+            )
+            build_result = run_cmd([
+                "docker", "exec", "--workdir", "/worktree", temp_name,
+                "bash", "-lc", build_cmd,
+            ], timeout=300, check=False)
+
+            if build_result.returncode != 0:
+                timed_log(f"  [{instance_id}] 编译失败: {build_result.stderr[:200]}")
+                return False
+
+        # 计数并验证
+        count_result = run_cmd([
+            "docker", "exec", temp_name, "bash", "-lc",
+            "find /worktree -name '*.so' | wc -l",
+        ], timeout=30, check=False)
+        so_count = count_result.stdout.strip()
+        timed_log(f"  [{instance_id}] 已就位 {so_count} 个 .so 文件")
+
+        # 验证 import astropy
+        verify = run_cmd([
+            "docker", "exec", "--workdir", "/worktree", temp_name, "bash", "-lc",
+            "python -c 'import astropy; print(astropy.__version__)' 2>&1",
+        ], timeout=30, check=False)
+
+        if verify.returncode == 0:
+            timed_log(f"  [{instance_id}] ✓ warmup 成功 (astropy {verify.stdout.strip()})")
+            return True
+        else:
+            # .so 文件已就位但 import 仍失败，可能是路径问题
+            timed_log(f"  [{instance_id}] import 验证失败: {verify.stderr[:200]}")
+            timed_log(f"  [{instance_id}] Agent 将使用纯代码阅读模式")
+            return False
+
+    finally:
+        run_cmd(["docker", "rm", "-f", temp_name], timeout=10, check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -454,17 +556,10 @@ def build_agent_prompt(instance: dict[str, Any]) -> str:
         3. **Trace**: use grep_search to find all callers/callees of your changed
            code. Check if your change requires adaptations elsewhere (e.g. other
            functions that parse the output, other comparison operators, etc.).
-        4. **Verify**: use run_shell to execute the relevant tests (pytest).
-           If pytest fails to import modules, that is OK — trust your code reading
-           and the official evaluator will test your fix independently.
-
-        ## ⚠ Critical Anti-Patterns — NEVER do this
-
-        - NEVER run `python -c "import astropy"` or `python setup.py build_ext`
-          or `pip install` — these will ALWAYS fail and waste your step budget.
-        - NEVER try to "fix the environment" before fixing the code.
-        - If a python/pytest command fails once, move on — do NOT retry it.
-          Read code with read_file/grep_search instead.
+        4. **Verify**: use run_shell to execute related tests with pytest.
+           Run `python -c "import astropy"` first to confirm the environment is
+           healthy, then run the specific test file(s) covering your change.
+           Use the test output to confirm your fix is correct.
 
         ## patch_file usage
 
@@ -483,10 +578,11 @@ def build_agent_prompt(instance: dict[str, Any]) -> str:
 
         ## Rules
 
-        - Always call patch_file BEFORE any run_shell verification.
+        - Always call patch_file BEFORE run_shell verification.
         - Use the smallest diff possible — one focused change per file.
-        - You CAN run: grep, sed, cat, find, head, tail, pytest, git diff.
-        - Do NOT run: pip, setup.py, build_ext, curl, wget, apt, yum.
+        - Run `python -c "import astropy"` and pytest to verify your fix.
+        - Do not retry the same failing command more than twice.
+        - Do NOT run: pip install, curl, wget, apt, yum (network is disabled).
         - Do not access network resources.
         - Do not access files outside this workspace.
         - Do not use SWE-bench gold patches or hidden test data.
@@ -833,6 +929,9 @@ def run_single_instance(
             update_state(instance_dir, "infra_error", result)
             return result
         timed_log(f"[{instance_id}] worktree 就绪: {worktree}")
+
+        # Phase 2.5: 预热 — 从镜像提取编译产物到 worktree
+        warmup_worktree(image, worktree, instance_id)
 
         # Phase 3: 容器启动
         container = AgentContainer(instance_id, image, worktree, batch_id)
