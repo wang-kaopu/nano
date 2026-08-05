@@ -428,7 +428,7 @@ def build_arg_parser():
     parser.add_argument("--base-url", default=None, help="Provider API base URL for deepseek, openai, or anthropic.")
     parser.add_argument("--openai-timeout", type=int, default=300, help="OpenAI-compatible request timeout in seconds.")
     parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
-    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="ask", help="Approval policy for risky tools.")
+    parser.add_argument("--approval", choices=("ask", "auto", "never"), default="auto", help="Approval policy for risky tools.")
     parser.add_argument(
         "--secret-env-name",
         dest="secret_env_names",

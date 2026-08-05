@@ -1071,6 +1071,7 @@ def test_build_arg_parser_defaults_provider_to_deepseek(tmp_path):
     args = nano_pkg.build_arg_parser().parse_args(["--cwd", str(tmp_path)])
 
     assert args.provider == "deepseek"
+    assert args.approval == "auto"
     assert not hasattr(args, "max_steps")
     assert not hasattr(args, "max_new_tokens")
 

@@ -140,25 +140,25 @@ async for event in run_agent(
 在当前仓库里启动交互模式。默认 provider 是 DeepSeek：
 
 ```bash
-uv run nano
+uv run nano --approval auto
 ```
 
 指定另一个工作目录：
 
 ```bash
-uv run nano --cwd /path/to/repo
+uv run nano --approval auto --cwd /path/to/repo
 ```
 
 直接跑一次性任务：
 
 ```bash
-uv run nano "inspect the test failures and propose a fix"
+uv run nano --approval auto "inspect the test failures and propose a fix"
 ```
 
 如果当前环境已经安装过包，也可以直接这样启动：
 
 ```bash
-python -m nano
+python -m nano --approval auto
 ```
 
 ## 模型后端
@@ -314,7 +314,7 @@ NANO_ANTHROPIC_MODEL="claude-sonnet-4-6"
 
 ## 安全与持久化
 
-`nano` 不会默认把所有动作都放开。仓库根目录的 `permissions.json` 分别定义普通工具与 shell 命令的项目级策略；默认策略已随项目提交。`run_shell` 会用 `bashlex` 解析 Bash AST，复合命令中的每个片段都需要独立匹配 `shell.allow` 规则，避免用安全前缀夹带危险子命令。无法解析为 AST 的命令会在执行前拒绝。
+`nano` 默认使用 `--approval auto`，风险工具无需人工审批。仓库根目录的 `permissions.json` 仍定义普通工具与 shell 命令的项目级拒绝策略；`deny` 规则始终生效。`run_shell` 会用 `bashlex` 解析 Bash AST，复合命令中的每个片段都需要独立匹配 `shell.allow` 规则，避免用安全前缀夹带危险子命令。无法解析为 AST 的命令会在执行前拒绝。
 
 - `--approval ask`
 - `--approval auto`
