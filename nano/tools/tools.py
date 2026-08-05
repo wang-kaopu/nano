@@ -537,12 +537,15 @@ def tool_search(context: ToolContext, args: ToolArgumentsPayload) -> str:
 
 
 def tool_run_shell(context: ToolContext, args: ToolArgumentsPayload) -> str:
+    """在本地或运行时注入的隔离执行器中运行受限 shell 命令。"""
     command = str(args.get("command", "")).strip()
     if not command:
         raise ValueError("command must not be empty")
     timeout = int(args.get("timeout", 20))
     if timeout < 1 or timeout > 120:
         raise ValueError("timeout must be in [1, 120]")
+    if context.shell_executor is not None:
+        return context.execute_shell(command, timeout)
     result = subprocess.run(
         command,
         cwd=context.root,

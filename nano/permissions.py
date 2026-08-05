@@ -81,9 +81,9 @@ class ProjectPermissions:
         return fnmatch.fnmatchcase(command, rule)
 
 
-def load_project_permissions(root: str | Path) -> ProjectPermissions:
-    """读取仓库根目录的 permissions.json，并验证配置结构。"""
-    path = Path(root) / PERMISSIONS_FILE_NAME
+def load_project_permissions(root: str | Path, permission_path: str | Path | None = None) -> ProjectPermissions:
+    """读取默认或调用方注入的权限文件，并验证配置结构。"""
+    path = Path(permission_path) if permission_path is not None else Path(root) / PERMISSIONS_FILE_NAME
     if not path.exists():
         return ProjectPermissions.empty()
     try:

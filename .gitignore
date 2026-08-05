@@ -48,6 +48,8 @@ docs/*
 !docs/review-pack/README.md
 !docs/architecture/
 !docs/architecture/agent-harness-v1-overview.md
+!docs/benchmarks/
+!docs/benchmarks/swebench_lite_pilot.md
 
 # OS files
 .DS_Store

@@ -77,3 +77,29 @@ def test_read_file_artifact_clipping_preserves_pagination_metadata(tmp_path):
     assert payload["resultArtifactPath"]
     assert payload["totalLines"] == 1
     assert "coveredRanges" in payload
+
+
+def test_run_shell_delegates_to_injected_executor_after_permission_check(tmp_path):
+    calls = []
+
+    def sandbox_executor(command, timeout):
+        """记录隔离 shell 调用，并返回标准化执行结果。"""
+        calls.append((command, timeout))
+        return "exit_code: 0\nstdout:\nsandbox\nstderr:\n(no output)"
+
+    runtime = build_agent(tmp_path, shell_executor=sandbox_executor)
+    result = ToolExecutor(runtime).execute("run_shell", {"command": "git status", "timeout": 7})
+
+    assert result.metadata["tool_status"] == "ok"
+    assert calls == [("git status", 7)]
+    assert "sandbox" in result.content
+
+
+def test_invalid_shell_history_does_not_crash_followup_tool_call(tmp_path):
+    runtime = build_agent(tmp_path)
+    runtime.session["history"] = [
+        {"role": "tool", "name": "run_shell", "args": {"command": "git status", "timeout": 600}, "content": "error"},
+        {"role": "tool", "name": "run_shell", "args": {"command": "git status", "timeout": 600}, "content": "error"},
+    ]
+
+    assert runtime.repeated_tool_call("run_shell", {"command": "git status", "timeout": 20}) is False

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "description": "Independent real-model SWE-bench Lite pilot. This manifest contains only tasks whose local official gold run has resolved successfully.",
+  "tasks": [
+    {
+      "instance_id": "sympy__sympy-20590",
+      "repo": "sympy/sympy",
+      "base_commit": "cffd4e0f86fefd4802349a9f9b19ed70934ea354",
+      "problem_statement": "Symbol instances have __dict__ since 1.7? In version 1.6.2 Symbol instances had no __dict__ attribute, but in 1.7 it exists and returns an empty dict. This appears to defeat __slots__ and may be caused by a parent class that stopped defining __slots__.",
+      "instance_image": "sweb.eval.x86_64.sympy__sympy-20590:latest",
+      "allowed_tools": ["read_file", "list_files", "search", "grep_search", "patch_file", "run_shell"],
+      "step_budget": 40,
+      "time_budget_seconds": 900
+    }
+  ]
+}

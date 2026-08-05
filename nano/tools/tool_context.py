@@ -102,9 +102,16 @@ class ToolContext:
     read_cursors: dict[str, FileReadCursor] = field(default_factory=dict)
     required_targets: dict[str, RequiredTargetState] = field(default_factory=dict)
     permissions: ProjectPermissions = field(default_factory=ProjectPermissions.empty)
+    shell_executor: Callable[[str, int], str] | None = None
 
     def path(self, raw_path: str) -> Path:
         return self.path_resolver(str(raw_path))
 
     def shell_env(self) -> dict[str, str]:
         return dict(self.shell_env_provider())
+
+    def execute_shell(self, command: str, timeout: int) -> str:
+        """通过注入执行器运行 shell；未注入时由工具使用本地 shell。"""
+        if self.shell_executor is None:
+            raise RuntimeError("shell executor is not configured")
+        return self.shell_executor(command, timeout)

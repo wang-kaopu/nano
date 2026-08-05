@@ -8,6 +8,7 @@ from typing import Any, Iterable, Mapping
 from pydantic import BaseModel, ConfigDict, Field
 
 from nano.runtime.runtime import AgentRuntime
+from nano.tools.tool import ToolResult
 from nano.tools.tools import WorkspaceTool, tool_definition
 from nano.utils.text import clip
 
@@ -167,7 +168,7 @@ class ToolExecutor:
                 ),
             )
 
-        if runtime.allowed_tools is not None and name not in runtime.allowed_tools and tool.name not in runtime.allowed_tools:
+        if runtime.allowed_tools is not None and name not in runtime.allowed_tools and tool.name not in runtime.allowed_tools and not any(alias in runtime.allowed_tools for alias in tool.aliases):
             return ToolExecutionResult(
                 content=f"error: tool '{name}' is not allowed in this run",
                 metadata=_metadata(
@@ -261,12 +262,17 @@ class ToolExecutor:
                 (str(item.get("content", "")) for item in reversed(runtime.session["history"]) if item.get("role") == "user"),
                 None,
             )
-            result = tool.call(
-                input_value,
-                runtime.tool_context(),
-                lambda candidate, _: runtime.allowed_tools is None or candidate.name in runtime.allowed_tools or name in runtime.allowed_tools,
-                parent_message,
-            )
+            if tool.name == "run_shell" and runtime.shell_executor is not None:
+                # 真实评测把已通过权限校验的命令交给隔离执行器，模型不接触宿主 shell。
+                output = runtime.shell_executor(str(args["command"]), int(args["timeout"]))
+                result = ToolResult(output=output, content=output)
+            else:
+                result = tool.call(
+                    input_value,
+                    runtime.tool_context(),
+                    lambda candidate, _: runtime.allowed_tools is None or candidate.name in runtime.allowed_tools or name in runtime.allowed_tools or any(alias in runtime.allowed_tools for alias in candidate.aliases),
+                    parent_message,
+                )
             content, result_artifact_path = self._render_read_file_result(result.content, tool.max_result_size_chars) if tool.name == "read_file" else self._render_result_content(tool, result.content)
             if not content.strip():
                 content = "(no output)"

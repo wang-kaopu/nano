@@ -46,6 +46,8 @@ class AgentDefinition:
     workspace_mutation_lock: asyncio.Lock | None = None
     required_targets: tuple[ResolvedTarget, ...] = ()
     limits: RuntimeLimits | None = None
+    permissions_path: str | None = None
+    shell_executor: Any | None = None
 
 
 def _normalize_prompt_messages(prompt_messages: PromptMessage | Iterable[PromptMessage]) -> str:
@@ -103,6 +105,8 @@ def build_runtime(
         agent_instructions=agent_definition.instructions,
         workspace_mutation_lock=agent_definition.workspace_mutation_lock,
         limits=agent_definition.limits,
+        permissions_path=agent_definition.permissions_path,
+        shell_executor=agent_definition.shell_executor,
     )
     runtime.register_required_targets(agent_definition.required_targets)
     return runtime

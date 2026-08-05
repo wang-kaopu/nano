@@ -136,6 +136,8 @@ class AgentRuntime:
         agent_instructions: str = "",
         workspace_mutation_lock: asyncio.Lock | None = None,
         limits: RuntimeLimits | None = None,
+        permissions_path: str | Path | None = None,
+        shell_executor: Any | None = None,
     ) -> None:
         from nano.runtime.context_manager import ContextManager
         from nano.tools.tool_executor import ToolExecutor
@@ -143,7 +145,8 @@ class AgentRuntime:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
-        self.permissions = load_project_permissions(self.root)
+        self.permissions = load_project_permissions(self.root, permissions_path)
+        self.shell_executor = shell_executor
         self.limits = limits or runtime_limits_from_env()
         self.read_file_state: dict[str, int] = {}
         self.read_coverage_state: dict[str, FileReadCoverage] = {}
@@ -321,7 +324,7 @@ class AgentRuntime:
         return {
             name: tool
             for name, tool in tools.items()
-            if name in allowed
+            if name in allowed or any(alias in allowed for alias in tool.aliases)
         }
 
     def tool_signature(self) -> str:
@@ -752,11 +755,17 @@ class AgentRuntime:
             return False
         normalized_args = toolkit.validate_tool_arguments(name, args)
         recent = tool_events[-2:]
-        return all(
-            item["name"] == name
-            and toolkit.validate_tool_arguments(name, item.get("args", {})) == normalized_args
-            for item in recent
-        )
+        for item in recent:
+            if item["name"] != name:
+                return False
+            try:
+                previous_args = toolkit.validate_tool_arguments(name, item.get("args", {}))
+            except ValueError:
+                # 历史中被拒绝的非法调用不能让后续合法工具调用崩溃。
+                return False
+            if previous_args != normalized_args:
+                return False
+        return True
 
     @staticmethod
     def new_task_id():
@@ -808,6 +817,7 @@ class AgentRuntime:
             required_targets=self.required_targets,
             agent_type=self.agent_type,
             permissions=self.permissions,
+            shell_executor=self.shell_executor,
         )
 
     def register_async_agent(self, async_agent_task_id: str, task: AsyncAgentTask) -> None:

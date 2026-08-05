@@ -28,6 +28,15 @@ def test_session_store_latest_is_none_when_empty(tmp_path):
     assert store.latest() is None
 
 
+def test_session_store_recreates_removed_directory_before_save(tmp_path):
+    store = SessionStore(tmp_path / ".nano" / "sessions")
+    store.root.rmdir()
+
+    path = store.save({"id": "session_recreated", "history": []})
+
+    assert path.exists()
+
+
 def test_session_store_lists_summaries_by_update_time_with_latest_message(tmp_path):
     store = SessionStore(tmp_path / ".nano" / "sessions")
     older_path = store.save({"id": "session_older", "history": [{"role": "user", "content": "Older message"}]})

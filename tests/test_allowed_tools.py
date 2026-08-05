@@ -34,6 +34,13 @@ def test_allowed_tools_reject_unknown_tool_at_construction(tmp_path):
         build_agent(tmp_path, allowed_tools=["read_file", "missing_tool"])
 
 
+def test_allowed_tools_accepts_search_aliases(tmp_path):
+    runtime = build_agent(tmp_path, allowed_tools=["grep_search"])
+
+    assert set(runtime.tools) == {"search"}
+    assert "README.md" in runtime.run_tool("search", {"pattern": "demo", "path": "."})
+
+
 def test_validate_benchmark_rejects_unknown_allowed_tool(tmp_path):
     fixture = tmp_path / "bench_repo_readme"
     fixture.mkdir()

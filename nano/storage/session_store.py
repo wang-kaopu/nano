@@ -25,6 +25,8 @@ class SessionStore:
         """校验、脱敏并保存会话，返回写入路径。"""
         model = session if isinstance(session, SessionModel) else SessionModel.model_validate(session)
         model = SessionModel.model_validate(redact_artifact(model.model_dump(mode="python"), secret_env_names=self.secret_env_names))
+        # 工具命令可能清理临时工作区；持久化前重建目录保证会话不中断。
+        self.root.mkdir(parents=True, exist_ok=True)
         path = self.path(model.id)
         path.write_text(model.model_dump_json(indent=2), encoding="utf-8")
         return path
