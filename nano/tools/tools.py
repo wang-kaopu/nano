@@ -472,21 +472,30 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     if coverage is None or coverage.file_mtime_ns != mtime_ns:
         coverage = FileReadCoverage(path=path_key, file_mtime_ns=mtime_ns, total_lines=total_lines)
         context.read_coverage_state[path_key] = coverage
+    requested_end = min(end, total_lines)
     returned_start = min(start, total_lines + 1)
-    returned_end = min(end, total_lines)
-    next_start = min(end + 1, total_lines + 1)
+    returned_end = requested_end
+    max_body_chars = max(800, context.read_file_max_result_size_chars - 1600)
+    if returned_start <= returned_end:
+        body_lines = []
+        for number, line in enumerate(lines[start - 1 : requested_end], start=start):
+            candidate = f"{number:>4}: {line}"
+            if body_lines and len("\n".join([*body_lines, candidate])) > max_body_chars:
+                break
+            body_lines.append(candidate)
+        returned_end = start + len(body_lines) - 1
+    next_start = min(returned_end + 1, total_lines + 1)
     next_cursor = ""
     has_more = next_start <= total_lines
+    effective_page_size = max(1, returned_end - start + 1)
     is_already_covered = any(existing_start <= returned_start and returned_end <= existing_end for existing_start, existing_end in coverage.covered_ranges)
     if total_lines and returned_start <= returned_end and is_already_covered:
         coverage.duplicate_requests += 1
-        if coverage.duplicate_requests >= 3:
-            return json.dumps({"status": "rejected", "errorCode": "repeated_read_range", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
         next_cursor = secrets.token_urlsafe(18) if has_more else ""
         if next_cursor:
-            context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, page_size, mtime_ns)
-        return json.dumps({"status": "already_covered", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "nextRange": {"start": next_start, "end": min(next_start + page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
-    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+            context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns)
+        return json.dumps({"status": "already_covered", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "nextRange": {"start": next_start, "end": min(next_start + effective_page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
+    body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1 : returned_end], start=start))
     if total_lines and returned_start <= returned_end:
         ranges = sorted([*coverage.covered_ranges, (returned_start, returned_end)])
         merged: list[tuple[int, int]] = []
@@ -501,12 +510,12 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     coverage.next_start = next_start
     if has_more:
         next_cursor = secrets.token_urlsafe(18)
-        context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, page_size, mtime_ns)
+        context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns)
     try:
         context.read_file_state[str(path)] = mtime_ns // 1_000_000
     except OSError:
         pass
-    return json.dumps({"status": "ok", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "returnedRange": {"start": returned_start, "end": returned_end}, "totalLines": total_lines, "hasMore": has_more, "nextRange": {"start": next_start, "end": min(next_start + page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "contentTruncated": False, "resultArtifactPath": "", "content": body}, ensure_ascii=False)
+    return json.dumps({"status": "ok", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "returnedRange": {"start": returned_start, "end": returned_end}, "totalLines": total_lines, "hasMore": has_more, "nextRange": {"start": next_start, "end": min(next_start + effective_page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "contentTruncated": False, "resultArtifactPath": "", "content": body}, ensure_ascii=False)
 
 
 def tool_search(context: ToolContext, args: ToolArgumentsPayload) -> str:
@@ -514,11 +523,12 @@ def tool_search(context: ToolContext, args: ToolArgumentsPayload) -> str:
     if not pattern:
         raise ValueError("pattern must not be empty")
     path = context.path(args.get("path", "."))
+    relative_path = "." if path == context.root else str(path.relative_to(context.root))
 
     if shutil.which("rg"):
         # 优先用 rg，因为搜索会非常频繁，搜索延迟会直接影响 agent 控制循环。
         result = subprocess.run(
-            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
+            ["rg", "-n", "--smart-case", "--max-count", "200", pattern, relative_path],
             cwd=context.root,
             capture_output=True,
             text=True,
@@ -682,7 +692,7 @@ TOOL_DEFINITIONS: tuple[WorkspaceTool, ...] = (
         name="patch_file",
         input_schema=PatchFileArguments,
         description_text="Replace one exact text block in a previously read file.",
-        prompt_text="Use patch_file after read_file when one exact, unique text block should change.",
+        prompt_text="Use patch_file with path, exact old_text occurring once, and replacement new_text; it does not accept a unified diff.",
         runner=tool_patch_file,
         read_only=False,
         concurrency_safe=False,

@@ -100,6 +100,17 @@ def test_query_engine_stops_after_three_invalid_tool_calls(tmp_path):
     assert runtime.current_task_state.stop_reason == "invalid_tool_call_limit_reached"
 
 
+def test_invalid_tool_limit_counts_consecutive_rejections_not_total_rejections(tmp_path):
+    invalid = '<tool>{"name":"delegate","args":{"tasks":[{"task":"Read README.md","type":"worker","scope":"."}]}}</tool>'
+    runtime = build_agent(tmp_path, [invalid, '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":1}}</tool>', invalid, invalid, invalid])
+
+    asyncio.run(QueryEngine(runtime).run_async("Read README.md"))
+
+    assert runtime.current_task_state.invalid_tool_calls == 4
+    assert runtime.current_task_state.consecutive_invalid_tool_calls == 3
+    assert runtime.current_task_state.stop_reason == "invalid_tool_call_limit_reached"
+
+
 def test_query_engine_stops_after_configured_protocol_retries(tmp_path):
     runtime = build_agent(tmp_path, ["", "", "", "", "<final>Too late.</final>"])
 

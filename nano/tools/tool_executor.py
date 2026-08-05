@@ -129,12 +129,9 @@ class ToolExecutor:
         except (json.JSONDecodeError, AttributeError):
             return "ok", "", True, True, False
         if status == "already_covered":
-            duplicate_count = int(json.loads(content).get("duplicateReadCalls", 1))
-            return "ok", "", False, duplicate_count >= 2, True
+            return "ok", "", False, True, True
         if status == "cursor_stale":
             return "ok", "", False, False, False
-        if status == "rejected":
-            return "rejected", str(json.loads(content).get("errorCode", "repeated_read_range")), False, False, True
         return "ok", "", True, True, False
 
     def execute(self, name: str, args: Mapping[str, Any]) -> ToolExecutionResult:

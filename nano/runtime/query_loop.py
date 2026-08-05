@@ -428,11 +428,14 @@ class QueryLoop:
                         yield QueryEvent("tool_started", {"name": name, "args": args})
                         tool_result = await asyncio.shield(tool_task)
                     tool_status = str(tool_result.metadata.get("tool_status", ""))
+                    progress_made = bool(tool_result.metadata.get("progress_made", True))
                     if tool_status == "rejected":
                         self.task_state.record_invalid_tool(name)
                     elif tool_result.metadata.get("counts_as_tool_step", True):
                         self.task_state.record_tool(name)
-                    self.task_state.last_tool_made_progress = bool(tool_result.metadata.get("progress_made", True))
+                    if tool_status != "rejected":
+                        self.task_state.record_tool_progress(progress_made)
+                    self.task_state.last_tool_made_progress = progress_made
                     if name == "list_files" and self.runtime.agent_type == "explorer":
                         self.task_state.explorer_list_files_calls = int(tool_result.metadata.get("explorer_list_files_calls", self.task_state.explorer_list_files_calls))
                     if name == "read_file" and tool_result.metadata.get("duplicate_read"):
@@ -485,7 +488,7 @@ class QueryLoop:
                     if tool_result.metadata.get("tool_error_code") == "approval_denied":
                         yield QueryEvent("stopped", {"reason": "approval_denied"})
                         return
-                if self.task_state.invalid_tool_calls >= self.runtime.limits.max_invalid_tool_calls:
+                if self.task_state.consecutive_invalid_tool_calls >= self.runtime.limits.max_invalid_tool_calls:
                     yield QueryEvent("stopped", {"reason": "invalid_tool_call_limit_reached"})
                     return
                 if anthropic_tool_results:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from nano.tools.tool import CanUseTool, Tool, ToolProgressData, ToolResult
 from nano.tools.tool_context import ToolContext
-from nano.tools.tools import DelegateArguments, InterruptAgentsArguments, ReadFileArguments, build_tool_registry, tool_definition, tool_delegate, tool_interrupt_agents, tool_json_schema, tool_read_file
+from nano.tools.tools import DelegateArguments, InterruptAgentsArguments, ReadFileArguments, build_tool_registry, tool_definition, tool_delegate, tool_interrupt_agents, tool_json_schema, tool_read_file, tool_search
 
 
 class DefaultTool(Tool[ReadFileArguments, str, ToolProgressData]):
@@ -41,6 +41,40 @@ def test_tool_context_supports_file_tools_without_full_nano(tmp_path):
     assert payload["path"] == "sample.txt"
     assert payload["totalLines"] == 1
     assert "alpha" in payload["content"]
+
+
+def test_search_returns_relative_paths_when_resolver_returns_absolute_path(tmp_path):
+    """验证搜索器内部使用绝对工作区路径时，模型仍只看到相对路径。"""
+    target = tmp_path / "astropy" / "io" / "ascii" / "qdp.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("raise ValueError('Unrecognized QDP line')\n", encoding="utf-8")
+    context = ToolContext(
+        root=tmp_path,
+        path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(),
+        shell_env_provider=lambda: {},
+        depth=0,
+        max_depth=1,
+        run_delegates=lambda specs: "unused",
+        interrupt_agents=lambda task_ids: 0,
+    )
+
+    result = tool_search(context, {"pattern": "Unrecognized QDP line", "path": "astropy"})
+
+    assert "astropy/io/ascii/qdp.py:1:" in result
+    assert str(tmp_path) not in result
+
+
+def test_read_file_limits_coverage_to_lines_visible_in_the_result(tmp_path):
+    """验证大范围读取会自动分页，避免覆盖未展示给模型的行。"""
+    (tmp_path / "large.txt").write_text("".join(f"line {index} " + "x" * 80 + "\n" for index in range(100)), encoding="utf-8")
+    context = ToolContext(root=tmp_path, path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(), shell_env_provider=lambda: {}, depth=0, max_depth=1, run_delegates=lambda specs: "unused", interrupt_agents=lambda task_ids: 0, read_file_max_result_size_chars=1200)
+
+    payload = json.loads(tool_read_file(context, {"path": "large.txt", "start": 1, "end": 100}))
+
+    assert payload["returnedRange"]["end"] < 100
+    assert payload["hasMore"] is True
+    assert payload["coveredRanges"] == [{"start": 1, "end": payload["returnedRange"]["end"]}]
+    assert payload["contentTruncated"] is False
 
 
 def test_tool_base_class_uses_safe_default_semantics():
@@ -151,8 +185,8 @@ def test_tool_schema_is_generated_from_pydantic_arguments():
     assert "command" in schema["required"]
 
 
-def test_read_file_returns_cursor_and_rejects_repeated_ranges(tmp_path):
-    """验证分页状态由运行时维护，重复读取遵循三次防护规则。"""
+def test_read_file_returns_cursor_and_keeps_repeated_ranges_non_invalid(tmp_path):
+    """验证分页状态由运行时维护，重复读取不会变成无效调用。"""
     (tmp_path / "sample.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
     context = ToolContext(root=tmp_path, path_resolver=lambda raw_path: (tmp_path / raw_path).resolve(), shell_env_provider=lambda: {}, depth=0, max_depth=1, run_delegates=lambda specs: "unused", interrupt_agents=lambda task_ids: 0)
 
@@ -167,7 +201,8 @@ def test_read_file_returns_cursor_and_rejects_repeated_ranges(tmp_path):
     assert next_page["returnedRange"] == {"start": 3, "end": 3}
     assert duplicate_one["status"] == duplicate_two["status"] == "already_covered"
     assert duplicate_two["duplicateReadCalls"] == 2
-    assert duplicate_three["errorCode"] == "repeated_read_range"
+    assert duplicate_three["status"] == "already_covered"
+    assert duplicate_three["nextCursor"]
 
 
 def test_read_file_rejects_stale_cursor_and_delegate_rejects_old_protocol(tmp_path):

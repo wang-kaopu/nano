@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import sys
+import textwrap
 import time
 import uuid
 from pathlib import Path
@@ -97,7 +98,25 @@ def load_public_instances(dataset_name: str, instance_ids: Iterable[str], sweben
 
 def build_task_prompt(task: dict[str, Any]) -> str:
     """构建仅包含公开问题描述和代码修改请求的模型输入。"""
-    return f"Repository: {task['repo']}\nBase commit: {task['base_commit']}\n\n{task['problem_statement']}\n\nImplement a minimal fix for this issue in the current workspace."
+    return textwrap.dedent(f"""\
+        Repository: {task['repo']}
+        Base commit: {task['base_commit']}
+
+        {task['problem_statement']}
+
+        Implement a minimal fix in the current workspace and follow this order:
+
+        1. Explore with read_file, list_files, and search using repository-relative paths.
+        2. Patch the source with patch_file before running verification. Supply path,
+           exact old_text occurring once, and replacement new_text; patch_file does
+           does not accept a unified diff. Leave a non-empty patch.
+        3. Trace every downstream consumer and comparison point of the changed value or API.
+        4. Run targeted tests. For parsing or serialization changes, perform a write→read round trip: the final verification command must construct the complete transformed input (for example, the entire input lowercased), read it through the changed public API, assert the parsed values, and inspect the result. A partial smoke test is not completion evidence.
+
+        The shell already runs at the repository root. Use repository-relative paths only; never use host paths or /testbed.
+        If an import or test fails because the environment lacks a dependency, record that as an environment limitation; do not install dependencies or repeat the same failed environment check.
+        Do not access network resources or SWE-bench private test data. Do not stop after explaining the fix: edit the workspace.
+    """)
 
 
 def write_predictions(path: str | Path, rows: Iterable[dict[str, Any]]) -> Path:

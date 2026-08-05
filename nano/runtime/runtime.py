@@ -818,6 +818,7 @@ class AgentRuntime:
             agent_type=self.agent_type,
             permissions=self.permissions,
             shell_executor=self.shell_executor,
+            read_file_max_result_size_chars=toolkit.tool_definition("read_file").max_result_size_chars,
         )
 
     def register_async_agent(self, async_agent_task_id: str, task: AsyncAgentTask) -> None:
@@ -1263,6 +1264,9 @@ class AgentRuntime:
         self.session_store.save(self.session)
 
     def path(self, raw_path):
+        raw_path = str(raw_path)
+        if raw_path == "/testbed" or raw_path.startswith("/testbed/"):
+            raw_path = raw_path.removeprefix("/testbed").lstrip("/") or "."
         path = Path(raw_path)
         path = path if path.is_absolute() else self.root / path
         resolved = path.resolve()

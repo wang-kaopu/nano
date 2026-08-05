@@ -48,6 +48,7 @@ class TaskState(BaseModel):
     duplicate_read_calls: int = Field(default=0, ge=0)
     last_tool_made_progress: bool = False
     invalid_tool_calls: int = Field(default=0, ge=0)
+    consecutive_invalid_tool_calls: int = Field(default=0, ge=0)
     protocol_retries: int = Field(default=0, ge=0)
     attempts: int = Field(default=0, ge=0)
     last_tool: str = ""
@@ -90,9 +91,16 @@ class TaskState(BaseModel):
         return self
 
     def record_invalid_tool(self, name: str) -> "TaskState":
-        """记录一次被护栏拒绝的工具调用，不消耗正常工作步骤预算。"""
+        """记录一次被护栏拒绝的工具调用及当前连续拒绝次数。"""
         self.invalid_tool_calls += 1
+        self.consecutive_invalid_tool_calls += 1
         self.last_tool = str(name or "")
+        return self
+
+    def record_tool_progress(self, made_progress: bool) -> "TaskState":
+        """在工具取得新进展后清零连续无效调用计数。"""
+        if made_progress:
+            self.consecutive_invalid_tool_calls = 0
         return self
 
     def record_protocol_retry(self) -> "TaskState":

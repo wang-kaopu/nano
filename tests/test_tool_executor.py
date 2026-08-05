@@ -79,6 +79,21 @@ def test_read_file_artifact_clipping_preserves_pagination_metadata(tmp_path):
     assert "coveredRanges" in payload
 
 
+def test_third_repeated_read_is_a_normal_step_and_not_rejected(tmp_path):
+    """验证重复读取仍消耗正常工具步数，但不会触发 invalid 调用计数。"""
+    runtime = build_agent(tmp_path)
+    executor = ToolExecutor(runtime)
+
+    for _ in range(3):
+        result = executor.execute("read_file", {"path": "README.md", "start": 1, "end": 1})
+
+    payload = json.loads(result.content)
+    assert payload["status"] == "already_covered"
+    assert result.metadata["tool_status"] == "ok"
+    assert result.metadata["counts_as_tool_step"] is True
+    assert result.metadata["duplicate_read"] is True
+
+
 def test_run_shell_delegates_to_injected_executor_after_permission_check(tmp_path):
     calls = []
 

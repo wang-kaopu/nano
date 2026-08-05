@@ -363,6 +363,19 @@ class TestPromptSanity:
         # 确保不泄漏 gold patch 内容（而非仅提及"不要用"）
         assert "SECRET" not in prompt
 
+    def test_prompt_requires_relative_paths_targeted_tests_and_round_trip(self):
+        instance = {"instance_id": "astropy__astropy-12907", "repo": "astropy/astropy", "base_commit": "abc123", "problem_statement": "Fix the bug."}
+        prompt = build_agent_prompt(instance).lower()
+        assert "patch_file before run_shell" in prompt
+        assert "old_text" in prompt and "new_text" in prompt
+        assert "does not accept a unified diff" in prompt
+        assert "repository-relative paths" in prompt
+        assert "environment limitation" in prompt
+        assert "write→read round trip" in prompt
+        assert "every downstream consumer" in prompt
+        assert "complete transformed input" in prompt
+        assert "partial smoke test is not completion evidence" in prompt
+
 
 # ---------------------------------------------------------------------------
 # 原子写入

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shlex
 import sys
@@ -34,6 +35,16 @@ def test_workspace_escape_is_rejected(tmp_path):
     result = runtime.run_tool("read_file", {"path": "../outside.txt"})
 
     assert "path escapes workspace" in result
+
+
+def test_container_workspace_alias_maps_to_the_same_repository(tmp_path):
+    """验证执行器内部可接收容器别名，但仍解析到宿主工作区。"""
+    (tmp_path / "README.md").write_text("demo\n", encoding="utf-8")
+    runtime = build_agent(tmp_path, [])
+
+    result = runtime.run_tool("read_file", {"path": "/testbed/README.md", "start": 1, "end": 1})
+
+    assert json.loads(result)["path"] == "README.md"
 
 
 def test_symlink_path_traversal_is_rejected(tmp_path):

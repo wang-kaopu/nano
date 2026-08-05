@@ -44,7 +44,7 @@ def build_dynamic_system_context(workspace) -> str:
     return "\n\n".join(
         (
             "You are operating in a local repository. Treat the following Git state and project instructions as authoritative context.",
-            "Paths supplied to workspace tools are relative to the repository root unless the tool says otherwise.",
+            "All file-tool paths and paths written inside shell commands are repository-relative. The shell already runs at the repository root. Never invent, expose, or use host paths or container paths such as /testbed; use paths like astropy/io/ascii/qdp.py instead.",
             workspace.system_text(),
         )
     )
@@ -95,6 +95,8 @@ def build_prompt_prefix(
         # 5. Using Tools
         - Use read_file / edit_file / list_files / grep_search instead of shell cat,
           sed, ls, grep. Reserve run_shell for actual shell operations.
+        - File tools and run_shell commands must use repository-relative paths; never
+          construct an absolute host path or a /testbed path.
         - If several tool calls are independent, make them in parallel.
         """
     ).strip()

@@ -551,40 +551,33 @@ def build_agent_prompt(instance: dict[str, Any]) -> str:
 
         1. **Explore**: use read_file / list_files / grep_search to locate the
            relevant source files and understand the root cause.
-        2. **Fix**: use patch_file to apply the minimal correct change. Output a
-           unified diff. Never stop at "I found the bug" — you MUST edit the file.
-        3. **Trace**: use grep_search to find all callers/callees of your changed
-           code. Check if your change requires adaptations elsewhere (e.g. other
-           functions that parse the output, other comparison operators, etc.).
-        4. **Verify**: use run_shell to execute related tests with pytest.
-           Run `python -c "import astropy"` first to confirm the environment is
-           healthy, then run the specific test file(s) covering your change.
-           Use the test output to confirm your fix is correct.
-
-        ## patch_file usage
-
-        patch_file requires a unified diff. Example for changing line 42 of
-        astropy/modeling/separable.py from `x = 1` to `x = 2`:
-
-        --- a/astropy/modeling/separable.py
-        +++ b/astropy/modeling/separable.py
-        @@ -40,7 +40,7 @@
-         import numpy as np
-
-        -x = 1
-        +x = 2
-
-         def separable_matrix(model):
+        2. **Fix**: use patch_file to apply the minimal correct change. Never stop
+           at "I found the bug" — you MUST edit the file and leave a non-empty patch.
+        3. **Trace**: use grep_search to find every downstream consumer and comparison
+           point of the changed value or API. Check each parser, serializer, caller,
+           and comparison that may need the same correction.
+        4. **Verify**: run targeted pytest tests after the patch. If you changed
+           parsing or serialization, explicitly verify a write→read round trip and
+           inspect the parsed result.
 
         ## Rules
 
         - Always call patch_file BEFORE run_shell verification.
+        - patch_file uses path + old_text + new_text, where old_text is the exact
+          existing text occurring once; it does not accept a unified diff. Example:
+          path="astropy/io/ascii/qdp.py", old_text="old code", new_text="new code".
         - Use the smallest diff possible — one focused change per file.
-        - Run `python -c "import astropy"` and pytest to verify your fix.
-        - Do not retry the same failing command more than twice.
-        - Do NOT run: pip install, curl, wget, apt, yum (network is disabled).
+        - Use repository-relative paths in every file tool and shell command. The
+          shell starts at the repository root; never use a host path or `/testbed`.
+        - For parser or serializer changes, the final verification command MUST
+          construct the complete transformed input (for example, the entire input
+          lowercased), read it through the changed public API, and assert the
+          expected parsed values. A partial smoke test is not completion evidence.
+          Do not claim the task is complete until this end-to-end check runs.
+        - If an import or test fails because the benchmark environment lacks a
+          dependency, record it as an environment limitation. Do not install
+          dependencies and do not repeat the same failed environment check.
         - Do not access network resources.
-        - Do not access files outside this workspace.
         - Do not use SWE-bench gold patches or hidden test data.
         - Do not stop after explaining the solution; implement it in the workspace.
     """)

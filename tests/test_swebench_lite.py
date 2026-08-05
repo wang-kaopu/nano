@@ -43,6 +43,21 @@ def test_prompt_has_no_private_evaluation_material():
         assert forbidden not in prompt
 
 
+def test_prompt_requires_relative_paths_targeted_tests_and_round_trip():
+    task = load_pilot_manifest(Path("benchmarks/swebench_lite_pilot.json"))["tasks"][0]
+    prompt = build_task_prompt(task).lower()
+
+    assert "repository-relative paths" in prompt
+    assert "patch the source with patch_file before running verification" in prompt
+    assert "old_text" in prompt and "new_text" in prompt
+    assert "does not accept a unified diff" in prompt
+    assert "environment limitation" in prompt
+    assert "write→read round trip" in prompt
+    assert "every downstream consumer" in prompt
+    assert "complete transformed input" in prompt
+    assert "partial smoke test is not completion evidence" in prompt
+
+
 def test_write_predictions_uses_official_json_shape(tmp_path):
     path = write_predictions(
         tmp_path / "predictions.json",

@@ -103,6 +103,7 @@ class ToolContext:
     required_targets: dict[str, RequiredTargetState] = field(default_factory=dict)
     permissions: ProjectPermissions = field(default_factory=ProjectPermissions.empty)
     shell_executor: Callable[[str, int], str] | None = None
+    read_file_max_result_size_chars: int = 5000
 
     def path(self, raw_path: str) -> Path:
         return self.path_resolver(str(raw_path))
