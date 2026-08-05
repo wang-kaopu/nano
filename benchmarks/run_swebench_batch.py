@@ -18,8 +18,10 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -959,14 +961,15 @@ def update_state(instance_dir: Path, status: str, result: InstanceResult | None 
 
 
 def run_batch(config: BatchConfig) -> dict[str, Any]:
-    """执行全部实例并返回汇总。"""
+    """执行全部实例并返回汇总。支持 --max-parallel 并行调度。"""
     instances = load_instances(config)
     batch_id = f"five-astropy-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     output_root = Path(config.output_root) / batch_id
     output_root.mkdir(parents=True, exist_ok=True)
 
+    max_parallel = max(1, config.max_parallel)
     timed_log(f"批次 ID: {batch_id}")
-    timed_log(f"实例数: {len(instances)}")
+    timed_log(f"实例数: {len(instances)}  并发数: {max_parallel}")
     timed_log(f"输出目录: {output_root}")
 
     batch_started = time.monotonic()
@@ -981,25 +984,56 @@ def run_batch(config: BatchConfig) -> dict[str, Any]:
         "max_steps": config.max_steps,
         "agent_timeout": config.agent_timeout,
         "evaluation_timeout": config.evaluation_timeout,
+        "max_parallel": max_parallel,
         "instances": [inst["instance_id"] for inst in instances],
         "started_at": batch_started_at,
     }
     atomic_write_json(output_root / "batch.json", batch_config)
 
-    results: list[InstanceResult] = []
+    # Phase 0: 串行预拉取所有镜像（避免 Docker 并发竞态）
+    timed_log("\n--- 预拉取镜像 ---")
+    for instance in instances:
+        image = instance_image_name(instance, config.namespace)
+        if not image_exists(image) and not config.dry_run:
+            pull_image(image)
+        timed_log(f"  镜像就绪: {instance['instance_id']}: {image}")
 
-    for i, instance in enumerate(instances):
+    # Phase 1: 并行执行各实例
+    timed_log(f"\n--- 并行执行 (max_parallel={max_parallel}) ---")
+    results: list[InstanceResult] = []
+    results_lock = threading.Lock()
+
+    def _run_one(idx: int, instance: dict[str, Any]) -> InstanceResult:
         timed_log(f"\n{'='*60}")
-        timed_log(f"[{i+1}/{len(instances)}] 开始: {instance['instance_id']}")
+        timed_log(f"[{idx+1}/{len(instances)}] 开始: {instance['instance_id']}")
         timed_log(f"{'='*60}")
 
         result = run_single_instance(config, instance, batch_id, output_root)
-        results.append(result)
 
         timed_log(f"[{instance['instance_id']}] 最终状态: {result.status}")
 
-        # 立即落盘中间汇总
-        _write_interim_summary(output_root, batch_id, results, batch_started_at)
+        # 线程安全地写入中间汇总
+        with results_lock:
+            results.append(result)
+            _write_interim_summary(output_root, batch_id, list(results), batch_started_at)
+
+        return result
+
+    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        futures = {
+            pool.submit(_run_one, i, instance): instance
+            for i, instance in enumerate(instances)
+        }
+        for future in as_completed(futures):
+            instance = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                timed_log(f"[{instance['instance_id']}] 执行异常: {exc}")
+
+    # 按原始顺序排列结果
+    instance_order = {inst["instance_id"]: i for i, inst in enumerate(instances)}
+    results.sort(key=lambda r: instance_order.get(r.instance_id, 999))
 
     batch_duration = time.monotonic() - batch_started
     return _write_final_summary(output_root, batch_id, results, batch_started_at, batch_duration)
