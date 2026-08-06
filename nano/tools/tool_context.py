@@ -85,6 +85,7 @@ class FileReadCursor:
     next_start: int
     page_size: int
     file_mtime_ns: int
+    file_size: int
 
 
 @dataclass

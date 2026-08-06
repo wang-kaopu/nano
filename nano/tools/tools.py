@@ -443,14 +443,16 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     if not path.is_file():
         raise ValueError("path is not a file")
     path_key = str(path)
-    mtime_ns = path.stat().st_mtime_ns
+    file_stat = path.stat()
+    mtime_ns = file_stat.st_mtime_ns
+    file_size = file_stat.st_size
     page_size = int(args.get("page_size", 200))
     cursor = str(args.get("cursor", ""))
     if cursor:
         cursor_state = context.read_cursors.get(cursor)
         if cursor_state is None or cursor_state.path != path_key:
             return json.dumps({"status": "cursor_stale", "path": str(path.relative_to(context.root)), "message": "The file changed after the previous read. Start a new read sequence."}, ensure_ascii=False)
-        if cursor_state.file_mtime_ns != mtime_ns:
+        if cursor_state.file_mtime_ns != mtime_ns or cursor_state.file_size != file_size:
             return json.dumps({"status": "cursor_stale", "path": str(path.relative_to(context.root)), "message": "The file changed after the previous read. Start a new read sequence."}, ensure_ascii=False)
         start = cursor_state.next_start
         page_size = cursor_state.page_size
@@ -493,7 +495,7 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
         coverage.duplicate_requests += 1
         next_cursor = secrets.token_urlsafe(18) if has_more else ""
         if next_cursor:
-            context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns)
+            context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns, file_size)
         return json.dumps({"status": "already_covered", "path": str(path.relative_to(context.root)), "requestedRange": {"start": start, "end": end}, "coveredRanges": [{"start": item[0], "end": item[1]} for item in coverage.covered_ranges], "nextRange": {"start": next_start, "end": min(next_start + effective_page_size - 1, total_lines)} if has_more else None, "nextCursor": next_cursor, "duplicateReadCalls": coverage.duplicate_requests}, ensure_ascii=False)
     body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1 : returned_end], start=start))
     if total_lines and returned_start <= returned_end:
@@ -510,7 +512,7 @@ def tool_read_file(context: ToolContext, args: ToolArgumentsPayload) -> str:
     coverage.next_start = next_start
     if has_more:
         next_cursor = secrets.token_urlsafe(18)
-        context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns)
+        context.read_cursors[next_cursor] = FileReadCursor(path_key, next_start, effective_page_size, mtime_ns, file_size)
     try:
         context.read_file_state[str(path)] = mtime_ns // 1_000_000
     except OSError:

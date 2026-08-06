@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -1210,8 +1210,8 @@ def _build_summary_md(summary: dict[str, Any]) -> str:
         "",
         "## 结果概览",
         "",
-        f"| 指标 | 数值 |",
-        f"|---|---|",
+        "| 指标 | 数值 |",
+        "|---|---|",
         f"| Resolved | {summary['resolved_count']} |",
         f"| Unresolved | {summary['unresolved_count']} |",
         f"| Agent Error | {summary['agent_error_count']} |",
@@ -1435,7 +1435,7 @@ def main(argv: list[str] | None = None) -> int:
     infra_err = summary["infra_error_count"]
 
     print(f"\n{'='*60}")
-    print(f"五实例评测完成")
+    print("五实例评测完成")
     print(f"Resolved: {resolved}")
     print(f"Unresolved: {unresolved}")
     print(f"Agent error: {agent_err}")
