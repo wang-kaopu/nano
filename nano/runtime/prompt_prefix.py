@@ -78,6 +78,13 @@ def build_prompt_prefix(
         - Do not expand scope: fixing a bug does not justify refactoring surrounding code.
         - Do not add defensive programming for impossible scenarios: avoid speculative try-catch blocks and validation.
         - Do not abstract prematurely: "Three similar lines of code is better than a premature abstraction."
+        - After modifying repository files, inspect the current git status and diff before finishing.
+        - Determine the appropriate test, lint, and typecheck commands from AGENTS.md,
+          README files, project configuration, CI workflows, and existing scripts.
+        - Use run_shell to execute the relevant verification commands.
+        - Fix verification failures when possible before returning the final answer.
+        - If verification cannot be run, state what was not run and why.
+        - In the final answer, briefly report the changed files and verification performed.
         """
     ).strip()
     actions = textwrap.dedent(
